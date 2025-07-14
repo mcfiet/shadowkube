@@ -72,7 +72,6 @@ spec:
       max_wal_size: "4GB"
       # Reduce fsync for benchmarking (not for production!)
       synchronous_commit: "off"
-      checkpoint_segments: "32"
   
   bootstrap:
     initdb:
@@ -87,7 +86,7 @@ spec:
   
   storage:
     storageClass: openebs-hostpath
-    size: 5Gi  # Larger storage for benchmark data
+    size: 5Gi
     
   resources:
     requests:
@@ -96,9 +95,6 @@ spec:
     limits:
       memory: "1Gi"
       cpu: "1000m"
-      
-  monitoring:
-    enabled: false  # Disable monitoring during benchmark
 ---
 apiVersion: v1
 kind: Secret
