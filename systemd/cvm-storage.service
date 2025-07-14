@@ -1,0 +1,16 @@
+[Unit]
+Description=Setup encrypted storage for cVM
+After=local-fs.target
+Requires=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/vault-token-persistence.sh
+ExecStart=/usr/local/bin/vault-token-persistence.sh
+ExecStart=/usr/local/bin/simple-cvm-attestation.sh
+ExecStart=/usr/local/bin/setup-cvm-storage.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+
