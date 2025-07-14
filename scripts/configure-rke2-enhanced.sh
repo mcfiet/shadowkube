@@ -77,4 +77,3 @@ chmod 600 /etc/rancher/rke2/config.yaml
 echo "✅ RKE2 configured as $NODE_ROLE"
 echo "   Node IP (external): $NODE_IP"
 echo "   Wireguard IP (cluster): $WG_IP"
-EOF

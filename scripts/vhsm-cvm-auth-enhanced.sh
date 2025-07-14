@@ -151,4 +151,3 @@ if [ "$NODE_ROLE" = "master" ]; then
 fi
 
 echo "✅ Enhanced cVM registration complete for $NODE_ROLE node"
-EOF

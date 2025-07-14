@@ -62,4 +62,3 @@ echo "3. Configure: sudo /usr/local/bin/configure-wireguard-enhanced.sh"
 echo "4. Configure: sudo /usr/local/bin/configure-rke2-enhanced.sh"
 echo "5. Start networking: sudo systemctl start wg-quick@wg0"
 echo "6. Start K8s: sudo systemctl start rke2-${NODE_ROLE} (server/agent)"
-EOF

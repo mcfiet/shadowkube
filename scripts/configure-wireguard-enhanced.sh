@@ -139,4 +139,3 @@ echo "   Discovered peers: $PEER_COUNT"
 echo
 echo "=== Wireguard Configuration Summary ==="
 grep -v "PrivateKey" /etc/wireguard/wg0.conf || true
-EOF

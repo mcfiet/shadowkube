@@ -19,4 +19,3 @@ echo "❌ Vault re-authentication required!"
 echo "Please run: vault login -address https://vhsm.enclaive.cloud/"
 echo "Then restart services: sudo systemctl restart cvm-secrets-enhanced"
 exit 1
-EOF

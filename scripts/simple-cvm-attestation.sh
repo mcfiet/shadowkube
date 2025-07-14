@@ -96,4 +96,3 @@ cat >/tmp/cvm-attestation.json <<EOF_ATTESTATION
     "bounce_buffers": "$BOUNCE_BUFFERS"
 }
 EOF_ATTESTATION
-EOF
