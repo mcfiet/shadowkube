@@ -1,15 +1,38 @@
 #!/bin/bash
 set -e
 
+# VHSM Environment
+export VAULT_ADDR=https://vhsm.enclaive.cloud/
+
 NODE_NAME=$(hostname)
 CVM_TYPE="regular"
 if sudo dmesg 2>/dev/null | grep -qi "Memory Encryption"; then
     CVM_TYPE="confidential"
 fi
 
-echo "🚀 Smart PostgreSQL Benchmark - $NODE_NAME ($CVM_TYPE)"
+echo "🚀 VHSM PostgreSQL Benchmark - $NODE_NAME ($CVM_TYPE)"
 
-# Smart namespace handling
+# Check VHSM connection
+if ! vault token lookup >/dev/null 2>&1; then
+    echo "❌ VHSM vault not authenticated. Please run: vault login"
+    exit 1
+fi
+
+echo "✅ VHSM vault connection verified"
+
+# Get existing CNPG credentials from VHSM
+echo "🔐 Getting PostgreSQL credentials from VHSM..."
+POSTGRES_SUPERUSER_PASSWORD=$(vault read -namespace=team-msc -field=superuser_password cubbyhole/cluster-shared/cnpg 2>/dev/null || echo "")
+PGBENCH_PASSWORD=$(vault read -namespace=team-msc -field=pgbench_password cubbyhole/cluster-shared/benchmark 2>/dev/null || echo "")
+
+if [ -z "$POSTGRES_SUPERUSER_PASSWORD" ] || [ -z "$PGBENCH_PASSWORD" ]; then
+    echo "❌ Missing VHSM credentials. Please run the VHSM setup first."
+    exit 1
+fi
+
+echo "✅ VHSM credentials retrieved"
+
+# Create unique namespace
 NAMESPACE="pgbench-$(date +%s)"
 echo "📁 Using namespace: $NAMESPACE"
 
@@ -23,45 +46,66 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# Create simple cluster
+# Create PostgreSQL cluster with VHSM credentials
 cat << EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: postgres-superuser
+  namespace: $NAMESPACE
+type: kubernetes.io/basic-auth
+data:
+  username: $(echo -n postgres | base64)
+  password: $(echo -n "$POSTGRES_SUPERUSER_PASSWORD" | base64)
+---
+apiVersion: v1
+kind: Secret  
+metadata:
+  name: benchmark-credentials
+  namespace: $NAMESPACE
+type: kubernetes.io/basic-auth
+data:
+  username: $(echo -n pgbench | base64)
+  password: $(echo -n "$PGBENCH_PASSWORD" | base64)
+---
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: postgres
+  name: benchmark-pg
   namespace: $NAMESPACE
 spec:
   instances: 1
+  
+  bootstrap:
+    initdb:
+      database: benchmark
+      owner: postgres
+      secret:
+        name: postgres-superuser
+  
   storage:
     storageClass: openebs-hostpath
-    size: 1Gi
-  resources:
-    requests:
-      memory: "256Mi"
-      cpu: "250m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
+    size: 2Gi
 EOF
 
-echo "⏳ Waiting for PostgreSQL (3 minutes max)..."
-if ! kubectl wait --for=condition=Ready cluster/postgres -n $NAMESPACE --timeout=180s; then
-    echo "❌ PostgreSQL cluster failed to start"
-    kubectl get events -n $NAMESPACE
-    exit 1
-fi
+echo "⏳ Waiting for PostgreSQL cluster..."
+kubectl wait --for=condition=Ready cluster/benchmark-pg -n $NAMESPACE --timeout=300s
 
-echo "✅ PostgreSQL ready!"
+echo "✅ PostgreSQL cluster ready!"
 
-# Get password
-PGPASSWORD=$(kubectl get secret postgres-superuser -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
+# Wait a bit more for service to be fully ready
+sleep 10
 
-# Create and run benchmark job
+# Get the actual service IP for debugging
+PG_SERVICE_IP=$(kubectl get svc benchmark-pg-rw -n $NAMESPACE -o jsonpath='{.spec.clusterIP}')
+echo "📡 PostgreSQL service IP: $PG_SERVICE_IP"
+
+# Create benchmark job with proper DNS and credentials
 cat << EOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: benchmark
+  name: pgbench-job
   namespace: $NAMESPACE
 spec:
   template:
@@ -72,86 +116,103 @@ spec:
         image: postgres:15-alpine
         env:
         - name: PGHOST
-          value: postgres-rw
+          value: "benchmark-pg-rw.$NAMESPACE.svc.cluster.local"
+        - name: PGPORT
+          value: "5432"
         - name: PGUSER
-          value: postgres
+          value: "postgres"
         - name: PGPASSWORD
-          value: "$PGPASSWORD"
+          value: "$POSTGRES_SUPERUSER_PASSWORD"
         - name: PGDATABASE
-          value: postgres
+          value: "postgres"
         command:
         - bash
         - -c
         - |
           echo "🔗 Connecting to PostgreSQL..."
-          for i in {1..30}; do
-            if pg_isready; then
-              echo "✅ Connected!"
+          echo "Host: \$PGHOST"
+          echo "User: \$PGUSER"
+          
+          # Wait for connection with better error handling
+          for i in {1..60}; do
+            if pg_isready -h \$PGHOST -p \$PGPORT -U \$PGUSER; then
+              echo "✅ PostgreSQL is ready!"
               break
             fi
+            echo "Waiting for PostgreSQL... (\$i/60)"
             sleep 2
           done
           
-          echo "🗄️ Setting up benchmark database..."
-          createdb benchmark || true
+          # Test connection
+          echo "Testing connection..."
+          psql -h \$PGHOST -U \$PGUSER -d \$PGDATABASE -c "SELECT version();" || exit 1
+          
+          # Create benchmark database
+          echo "🗄️ Creating benchmark database..."
+          createdb -h \$PGHOST -U \$PGUSER benchmark || echo "Database might exist"
           export PGDATABASE=benchmark
           
-          echo "📊 Initializing pgbench (scale 5)..."
-          pgbench -i -s 5 -q
+          echo "📊 Initializing pgbench (scale 10)..."
+          pgbench -h \$PGHOST -U \$PGUSER -d benchmark -i -s 10 -q
           
           echo ""
-          echo "🚀 Running benchmarks..."
+          echo "🚀 Running benchmarks on $NODE_NAME ($CVM_TYPE VM)..."
           echo ""
           
-          echo "=== Single Client (20 seconds) ==="
-          pgbench -c 1 -T 20 -P 5
+          echo "=== Single Client (30 seconds) ==="
+          pgbench -h \$PGHOST -U \$PGUSER -d benchmark -c 1 -j 1 -T 30 -P 5 -r
           
           echo ""
-          echo "=== 5 Clients (20 seconds) ==="
-          pgbench -c 5 -T 20 -P 5
+          echo "=== 5 Clients (30 seconds) ==="
+          pgbench -h \$PGHOST -U \$PGUSER -d benchmark -c 5 -j 2 -T 30 -P 5 -r
           
           echo ""
-          echo "=== 10 Clients (20 seconds) ==="
-          pgbench -c 10 -T 20 -P 5
+          echo "=== 10 Clients (30 seconds) ==="
+          pgbench -h \$PGHOST -U \$PGUSER -d benchmark -c 10 -j 4 -T 30 -P 5 -r
+          
+          echo ""
+          echo "=== Read-Only Test (30 seconds) ==="
+          pgbench -h \$PGHOST -U \$PGUSER -d benchmark -c 10 -j 4 -T 30 -S -P 5 -r
           
           echo ""
           echo "✅ Benchmark completed!"
 EOF
 
-echo "🏃 Running benchmark job..."
-kubectl wait --for=condition=complete job/benchmark -n $NAMESPACE --timeout=180s
+echo "🏃 Running pgbench job..."
+kubectl wait --for=condition=complete job/pgbench-job -n $NAMESPACE --timeout=600s
 
 echo ""
-echo "📊 Results:"
-kubectl logs job/benchmark -n $NAMESPACE
+echo "📊 Benchmark Results:"
+RESULTS=$(kubectl logs job/pgbench-job -n $NAMESPACE)
+echo "$RESULTS"
 
-# Extract TPS results for summary
+# Extract TPS values
+TPS_1=$(echo "$RESULTS" | grep -A10 "Single Client" | grep "excluding connections establishing" | awk '{print $1}' | head -1 || echo "0")
+TPS_5=$(echo "$RESULTS" | grep -A10 "5 Clients" | grep "excluding connections establishing" | awk '{print $1}' | head -1 || echo "0")
+TPS_10=$(echo "$RESULTS" | grep -A10 "10 Clients" | grep "excluding connections establishing" | awk '{print $1}' | head -1 || echo "0")
+TPS_READ=$(echo "$RESULTS" | grep -A10 "Read-Only" | grep "excluding connections establishing" | awk '{print $1}' | head -1 || echo "0")
+
 echo ""
 echo "📈 Summary:"
-RESULTS=$(kubectl logs job/benchmark -n $NAMESPACE)
-TPS_1=$(echo "$RESULTS" | grep -A5 "Single Client" | grep "tps =" | awk '{print $3}' || echo "N/A")
-TPS_5=$(echo "$RESULTS" | grep -A5 "5 Clients" | grep "tps =" | awk '{print $3}' || echo "N/A")
-TPS_10=$(echo "$RESULTS" | grep -A5 "10 Clients" | grep "tps =" | awk '{print $3}' || echo "N/A")
+echo "  Single client: $TPS_1 TPS"
+echo "  5 clients:     $TPS_5 TPS" 
+echo "  10 clients:    $TPS_10 TPS"
+echo "  Read-only:     $TPS_READ TPS"
 
-echo "  1 client:  $TPS_1 TPS"
-echo "  5 clients: $TPS_5 TPS"
-echo "  10 clients: $TPS_10 TPS"
-
-# Save results
-mkdir -p results
-cat > results/pgbench-$NODE_NAME-$(date +%H%M%S).json << RESULT_EOF
-{
-  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "node": "$NODE_NAME",
-  "vm_type": "$CVM_TYPE",
-  "results": {
-    "1_client_tps": "$TPS_1",
-    "5_client_tps": "$TPS_5",
-    "10_client_tps": "$TPS_10"
-  }
-}
-RESULT_EOF
-
+# Store results back in VHSM
 echo ""
-echo "💾 Results saved to: results/pgbench-$NODE_NAME-$(date +%H%M%S).json"
-echo "✅ Benchmark complete!"
+echo "💾 Storing results in VHSM..."
+vault write -namespace=team-msc cubbyhole/benchmark-results/$NODE_NAME-postgres-$(date +%Y%m%d-%H%M%S) \
+    timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    node_name="$NODE_NAME" \
+    vm_type="$CVM_TYPE" \
+    postgres_single_client_tps="$TPS_1" \
+    postgres_5_client_tps="$TPS_5" \
+    postgres_10_client_tps="$TPS_10" \
+    postgres_readonly_tps="$TPS_READ" \
+    benchmark_type="postgresql_cnpg" \
+    credentials_source="vhsm"
+
+echo "✅ VHSM PostgreSQL benchmark completed!"
+echo "🔐 All credentials managed via VHSM"
+echo "📊 Results stored in VHSM for analysis"
