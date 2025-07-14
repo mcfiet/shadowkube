@@ -7,71 +7,151 @@ if sudo dmesg 2>/dev/null | grep -qi "Memory Encryption"; then
     CVM_TYPE="confidential"
 fi
 
-echo "🚀 Simple PostgreSQL Benchmark - $NODE_NAME ($CVM_TYPE)"
+echo "🚀 Smart PostgreSQL Benchmark - $NODE_NAME ($CVM_TYPE)"
 
-# Clean up any old stuff
-kubectl delete namespace pgbench --ignore-not-found=true --wait=false
-sleep 5
+# Smart namespace handling
+NAMESPACE="pgbench-$(date +%s)"
+echo "📁 Using namespace: $NAMESPACE"
 
 # Create namespace
-kubectl create namespace pgbench
+kubectl create namespace $NAMESPACE
 
-# Create dead simple cluster
+# Cleanup function
+cleanup() {
+    echo "🧹 Cleaning up..."
+    kubectl delete namespace $NAMESPACE --ignore-not-found=true --wait=false &
+}
+trap cleanup EXIT
+
+# Create simple cluster
 cat << EOF | kubectl apply -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
-  name: simple-postgres
-  namespace: pgbench
+  name: postgres
+  namespace: $NAMESPACE
 spec:
   instances: 1
   storage:
     storageClass: openebs-hostpath
     size: 1Gi
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "500m"
 EOF
 
-echo "⏳ Waiting for PostgreSQL (2 minutes max)..."
-kubectl wait --for=condition=Ready cluster/simple-postgres -n pgbench --timeout=120s
+echo "⏳ Waiting for PostgreSQL (3 minutes max)..."
+if ! kubectl wait --for=condition=Ready cluster/postgres -n $NAMESPACE --timeout=180s; then
+    echo "❌ PostgreSQL cluster failed to start"
+    kubectl get events -n $NAMESPACE
+    exit 1
+fi
 
-echo "🏃 Running pgbench..."
+echo "✅ PostgreSQL ready!"
 
-# Run benchmark job
-kubectl run pgbench-test --image=postgres:15-alpine -n pgbench --rm -i --restart=Never -- bash -c "
-export PGHOST=simple-postgres-rw
-export PGUSER=postgres
-export PGPASSWORD=\$(kubectl get secret simple-postgres-superuser -n pgbench -o jsonpath='{.data.password}' | base64 -d)
-export PGDATABASE=postgres
+# Get password
+PGPASSWORD=$(kubectl get secret postgres-superuser -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
 
-echo 'Waiting for connection...'
-for i in {1..30}; do
-  if pg_isready -h \$PGHOST -U \$PGUSER; then
-    echo 'Connected!'
-    break
-  fi
-  sleep 2
-done
+# Create and run benchmark job
+cat << EOF | kubectl apply -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: benchmark
+  namespace: $NAMESPACE
+spec:
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: pgbench
+        image: postgres:15-alpine
+        env:
+        - name: PGHOST
+          value: postgres-rw
+        - name: PGUSER
+          value: postgres
+        - name: PGPASSWORD
+          value: "$PGPASSWORD"
+        - name: PGDATABASE
+          value: postgres
+        command:
+        - bash
+        - -c
+        - |
+          echo "🔗 Connecting to PostgreSQL..."
+          for i in {1..30}; do
+            if pg_isready; then
+              echo "✅ Connected!"
+              break
+            fi
+            sleep 2
+          done
+          
+          echo "🗄️ Setting up benchmark database..."
+          createdb benchmark || true
+          export PGDATABASE=benchmark
+          
+          echo "📊 Initializing pgbench (scale 5)..."
+          pgbench -i -s 5 -q
+          
+          echo ""
+          echo "🚀 Running benchmarks..."
+          echo ""
+          
+          echo "=== Single Client (20 seconds) ==="
+          pgbench -c 1 -T 20 -P 5
+          
+          echo ""
+          echo "=== 5 Clients (20 seconds) ==="
+          pgbench -c 5 -T 20 -P 5
+          
+          echo ""
+          echo "=== 10 Clients (20 seconds) ==="
+          pgbench -c 10 -T 20 -P 5
+          
+          echo ""
+          echo "✅ Benchmark completed!"
+EOF
 
-echo 'Creating test database...'
-createdb pgbench || true
-export PGDATABASE=pgbench
+echo "🏃 Running benchmark job..."
+kubectl wait --for=condition=complete job/benchmark -n $NAMESPACE --timeout=180s
 
-echo 'Initializing pgbench...'
-pgbench -i -s 5
+echo ""
+echo "📊 Results:"
+kubectl logs job/benchmark -n $NAMESPACE
 
-echo 'Running benchmarks...'
-echo '=== 1 client ==='
-pgbench -c 1 -T 15
+# Extract TPS results for summary
+echo ""
+echo "📈 Summary:"
+RESULTS=$(kubectl logs job/benchmark -n $NAMESPACE)
+TPS_1=$(echo "$RESULTS" | grep -A5 "Single Client" | grep "tps =" | awk '{print $3}' || echo "N/A")
+TPS_5=$(echo "$RESULTS" | grep -A5 "5 Clients" | grep "tps =" | awk '{print $3}' || echo "N/A")
+TPS_10=$(echo "$RESULTS" | grep -A5 "10 Clients" | grep "tps =" | awk '{print $3}' || echo "N/A")
 
-echo '=== 5 clients ==='
-pgbench -c 5 -T 15  
+echo "  1 client:  $TPS_1 TPS"
+echo "  5 clients: $TPS_5 TPS"
+echo "  10 clients: $TPS_10 TPS"
 
-echo '=== 10 clients ==='
-pgbench -c 10 -T 15
+# Save results
+mkdir -p results
+cat > results/pgbench-$NODE_NAME-$(date +%H%M%S).json << RESULT_EOF
+{
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "node": "$NODE_NAME",
+  "vm_type": "$CVM_TYPE",
+  "results": {
+    "1_client_tps": "$TPS_1",
+    "5_client_tps": "$TPS_5",
+    "10_client_tps": "$TPS_10"
+  }
+}
+RESULT_EOF
 
-echo 'Done!'
-"
-
-# Cleanup
-kubectl delete namespace pgbench
-
+echo ""
+echo "💾 Results saved to: results/pgbench-$NODE_NAME-$(date +%H%M%S).json"
 echo "✅ Benchmark complete!"
