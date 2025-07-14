@@ -1,0 +1,23 @@
+[Unit]
+Description=cVM Encrypted Storage with Reboot Safety
+After=cvm-secrets-enhanced.service
+Requires=cvm-secrets-enhanced.service
+Before=rke2-agent.service rke2-server.service wg-quick@wg0.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/setup-cvm-enhanced.sh  # oder ggf. spezifisches Storage-Skript
+ExecStop=/bin/bash -c '\
+    echo "Unmounting cVM storage"; \
+    umount /var/lib/rancher 2>/dev/null || true; \
+    cryptsetup luksClose cvm-storage 2>/dev/null || true; \
+    losetup -D 2>/dev/null || true; \
+    echo "✅ Unmounted"'
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+

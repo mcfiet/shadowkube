@@ -1,0 +1,15 @@
+[Unit]
+Description=cVM Auto-Start Coordination
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/cvm-autostart.sh
+RemainAfterExit=no
+Restart=on-failure
+RestartSec=60
+
+[Install]
+WantedBy=multi-user.target
+
