@@ -7,11 +7,26 @@ CVM_TYPE="confidential"
 echo "🚀 Perfect CNPG Benchmark - $NODE_NAME"
 
 NAMESPACE="benchmark-perfect"
-kubectl delete namespace $NAMESPACE --ignore-not-found=true --wait=true
+
+# Cleanup vorheriger Reste (inkl. Finalizer-Blocker)
+if kubectl get namespace $NAMESPACE &>/dev/null; then
+  echo "🧹 Vorheriges Cluster und Namespace $NAMESPACE entfernen…"
+  # Cluster-CR ohne Finalizer löschen
+  kubectl delete cluster postgres -n "$NAMESPACE" \
+    --force --grace-period=0 --ignore-not-found || true
+  kubectl patch cluster postgres -n $NAMESPACE \
+    -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+  # Namespace sofort zwingen zu löschen und Finalizer entfernen
+  kubectl delete namespace "$NAMESPACE" \
+    --force --grace-period=0 --ignore-not-found || true
+  kubectl patch namespace $NAMESPACE \
+    -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+fi
+
 kubectl create namespace $NAMESPACE
 
 # Create cluster
-cat << EOF | kubectl apply -f -
+cat <<EOF | kubectl apply -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -104,22 +119,22 @@ echo "  ✅ Duration: 20 seconds per test"
 
 # Store comprehensive results in VHSM
 if command -v vault >/dev/null 2>&1; then
-    export VAULT_ADDR=https://vhsm.enclaive.cloud/
-    if vault token lookup >/dev/null 2>&1; then
-        echo "💾 Storing comprehensive results in VHSM..."
-        vault write -namespace=team-msc cubbyhole/benchmark-results/$NODE_NAME-postgresql-final-$(date +%s) \
-            timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            node_name="$NODE_NAME" \
-            vm_type="$CVM_TYPE" \
-            benchmark_type="postgresql_cnpg_working" \
-            postgresql_version="17.5" \
-            scale_factor="10" \
-            tests_completed="single_client,5_clients,10_clients,readonly" \
-            test_duration_seconds="20" \
-            total_rows="1000000" \
-            status="success"
-        echo "✅ Results stored in VHSM"
-    fi
+  export VAULT_ADDR=https://vhsm.enclaive.cloud/
+  if vault token lookup >/dev/null 2>&1; then
+    echo "💾 Storing comprehensive results in VHSM..."
+    vault write -namespace=team-msc cubbyhole/benchmark-results/$NODE_NAME-postgresql-final-$(date +%s) \
+      timestamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      node_name="$NODE_NAME" \
+      vm_type="$CVM_TYPE" \
+      benchmark_type="postgresql_cnpg_working" \
+      postgresql_version="17.5" \
+      scale_factor="10" \
+      tests_completed="single_client,5_clients,10_clients,readonly" \
+      test_duration_seconds="20" \
+      total_rows="1000000" \
+      status="success"
+    echo "✅ Results stored in VHSM"
+  fi
 fi
 
 echo ""
@@ -128,4 +143,4 @@ echo "📊 For detailed TPS numbers, check the pgbench output above"
 echo "💾 Results summary stored in VHSM for comparison with other nodes"
 
 # Cleanup
-kubectl delete namespace $NAMESPACE
+kubectl delete namespace $NAMESPACE --force
