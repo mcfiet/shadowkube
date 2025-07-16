@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# Fixed Standalone CNPG Benchmark - Works on both cVM and regular VM
+# Working CNPG Benchmark - Uses CNPG's default credential system
 NODE_NAME=$(hostname)
 
 # Auto-detect VM type (handle dmesg permission issues)
@@ -31,26 +31,24 @@ detect_vm_type() {
 CVM_TYPE=$(detect_vm_type)
 NAMESPACE="benchmark-perfect"
 LOG_FILE="/tmp/benchmark-${NODE_NAME}-$(date +%Y%m%d-%H%M%S).log"
-RESULTS_FILE="/tmp/benchmark-results-${NODE_NAME}-$(date +%Y%m%d-%H%M%S).json"
 
 # Logging function
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
 }
 
-# Enhanced error handling with debugging
+# Enhanced error handling
 cleanup_on_error() {
-    log "❌ Error occurred, performing detailed debugging..."
+    log "❌ Error occurred, cleaning up..."
     kubectl delete namespace "$NAMESPACE" --force --grace-period=0 --ignore-not-found &>/dev/null || true
     kubectl patch namespace "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
     log "🧹 Emergency cleanup completed"
     exit 1
 }
 
-# Set up error trap
 trap cleanup_on_error ERR
 
-log "🚀 Fixed CNPG Benchmark - $NODE_NAME ($CVM_TYPE VM)"
+log "🚀 Working CNPG Benchmark - $NODE_NAME ($CVM_TYPE VM)"
 
 # Pre-flight checks
 log "🔍 Pre-flight checks..."
@@ -87,57 +85,49 @@ fi
 
 log "✅ Pre-flight checks passed"
 
-# Enhanced cleanup
-cleanup_existing_resources() {
-    log "🧹 Cleaning up existing resources..."
+# Cleanup existing resources
+log "🧹 Cleaning up existing resources..."
+if kubectl get namespace "$NAMESPACE" &>/dev/null; then
+    log "Found existing namespace, attempting graceful cleanup..."
     
-    if kubectl get namespace "$NAMESPACE" &>/dev/null; then
-        log "Found existing namespace, attempting graceful cleanup..."
-        
-        if kubectl get cluster postgres -n "$NAMESPACE" &>/dev/null; then
-            kubectl delete cluster postgres -n "$NAMESPACE" --timeout=60s &>/dev/null || {
-                log "⚠️ Graceful cluster deletion failed, forcing..."
-                kubectl patch cluster postgres -n "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
-                kubectl delete cluster postgres -n "$NAMESPACE" --force --grace-period=0 --ignore-not-found &>/dev/null || true
-            }
-        fi
-        
-        log "⏳ Waiting for pods to terminate..."
-        for i in {1..30}; do
-            if ! kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep -q .; then
-                break
-            fi
-            sleep 2
-        done
-        
-        kubectl delete namespace "$NAMESPACE" --timeout=60s &>/dev/null || {
-            log "⚠️ Graceful namespace deletion failed, forcing..."
-            kubectl patch namespace "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
-            kubectl delete namespace "$NAMESPACE" --force --grace-period=0 --ignore-not-found &>/dev/null || true
+    if kubectl get cluster postgres -n "$NAMESPACE" &>/dev/null; then
+        kubectl delete cluster postgres -n "$NAMESPACE" --timeout=60s &>/dev/null || {
+            kubectl patch cluster postgres -n "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
+            kubectl delete cluster postgres -n "$NAMESPACE" --force --grace-period=0 --ignore-not-found &>/dev/null || true
         }
     fi
     
-    log "⏳ Waiting for namespace cleanup..."
+    log "⏳ Waiting for pods to terminate..."
     for i in {1..30}; do
-        if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        if ! kubectl get pods -n "$NAMESPACE" --no-headers 2>/dev/null | grep -q .; then
             break
         fi
         sleep 2
     done
     
-    log "✅ Cleanup completed"
-}
+    kubectl delete namespace "$NAMESPACE" --timeout=60s &>/dev/null || {
+        kubectl patch namespace "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
+        kubectl delete namespace "$NAMESPACE" --force --grace-period=0 --ignore-not-found &>/dev/null || true
+    }
+fi
 
-# Perform cleanup
-cleanup_existing_resources
+log "⏳ Waiting for namespace cleanup..."
+for i in {1..30}; do
+    if ! kubectl get namespace "$NAMESPACE" &>/dev/null; then
+        break
+    fi
+    sleep 2
+done
+
+log "✅ Cleanup completed"
 
 # Create namespace
 log "📦 Creating namespace..."
 kubectl create namespace "$NAMESPACE"
 log "✅ Namespace created successfully"
 
-# Create PostgreSQL cluster with FIXED configuration for app user
-log "🗄️ Creating PostgreSQL cluster with app user..."
+# Create simple PostgreSQL cluster that uses CNPG defaults
+log "🗄️ Creating PostgreSQL cluster with CNPG defaults..."
 cat <<EOF | kubectl apply -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -167,25 +157,6 @@ spec:
       default_statistics_target: "100"
       random_page_cost: "1.1"
       effective_io_concurrency: "200"
-  
-  # FIXED: Properly configure app database and user
-  bootstrap:
-    initdb:
-      database: app
-      owner: app
-      secret:
-        name: postgres-app
----
-# Create the app user secret manually to ensure it exists
-apiVersion: v1
-kind: Secret
-metadata:
-  name: postgres-app
-  namespace: $NAMESPACE
-type: kubernetes.io/basic-auth
-data:
-  username: $(echo -n 'app' | base64)
-  password: $(openssl rand -base64 32 | base64 -w 0)
 EOF
 
 # Wait for cluster to be ready
@@ -221,50 +192,20 @@ fi
 log "⏳ Waiting for pods to be ready..."
 kubectl wait --for=condition=Ready pod -l cnpg.io/cluster=postgres -n "$NAMESPACE" --timeout=300s
 
-# Get credentials - try multiple secret names
-log "🔑 Retrieving credentials..."
-POSTGRES_PASSWORD=""
-POSTGRES_USER=""
-
-# Try different secret naming patterns
-for secret_name in postgres-app postgres-superuser postgres-owner; do
-    if kubectl get secret "$secret_name" -n "$NAMESPACE" &>/dev/null; then
-        log "Found secret: $secret_name"
-        
-        # Try different field names
-        for field in password POSTGRES_PASSWORD; do
-            if TEMP_PASSWORD=$(kubectl get secret "$secret_name" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null | base64 -d 2>/dev/null); then
-                if [ -n "$TEMP_PASSWORD" ]; then
-                    POSTGRES_PASSWORD="$TEMP_PASSWORD"
-                    break
-                fi
+# Get superuser credentials (CNPG always creates this)
+log "🔑 Getting PostgreSQL superuser credentials..."
+for i in {1..15}; do
+    if kubectl get secret postgres-superuser -n "$NAMESPACE" &>/dev/null; then
+        if POSTGRES_PASSWORD=$(kubectl get secret postgres-superuser -n "$NAMESPACE" -o jsonpath='{.data.password}' 2>/dev/null | base64 -d); then
+            if [ -n "$POSTGRES_PASSWORD" ]; then
+                log "✅ Retrieved PostgreSQL superuser password (length: ${#POSTGRES_PASSWORD})"
+                break
             fi
-        done
-        
-        # Try different user field names
-        for field in username user POSTGRES_USER owner; do
-            if TEMP_USER=$(kubectl get secret "$secret_name" -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null | base64 -d 2>/dev/null); then
-                if [ -n "$TEMP_USER" ]; then
-                    POSTGRES_USER="$TEMP_USER"
-                fi
-            fi
-        done
-        
-        if [ -n "$POSTGRES_PASSWORD" ]; then
-            break
         fi
     fi
+    log "⚠️ Waiting for superuser credentials... ($i/15)"
+    sleep 5
 done
-
-# Fallback to superuser if app user not found
-if [ -z "$POSTGRES_PASSWORD" ]; then
-    log "⚠️ App credentials not found, trying superuser..."
-    if kubectl get secret postgres-superuser -n "$NAMESPACE" &>/dev/null; then
-        POSTGRES_PASSWORD=$(kubectl get secret postgres-superuser -n "$NAMESPACE" -o jsonpath='{.data.password}' | base64 -d)
-        POSTGRES_USER="postgres"
-        POSTGRES_DATABASE="postgres"
-    fi
-fi
 
 if [ -z "$POSTGRES_PASSWORD" ]; then
     log "❌ Failed to retrieve PostgreSQL password"
@@ -273,23 +214,18 @@ if [ -z "$POSTGRES_PASSWORD" ]; then
     exit 1
 fi
 
-# Set defaults
-POSTGRES_USER=${POSTGRES_USER:-"app"}
-POSTGRES_DATABASE=${POSTGRES_DATABASE:-"app"}
-
-log "✅ Retrieved PostgreSQL credentials (user: $POSTGRES_USER, password length: ${#POSTGRES_PASSWORD})"
-
 # Get service IP
+log "🔍 Getting service information..."
 PG_IP=$(kubectl get svc postgres-rw -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
 log "✅ PostgreSQL service IP: $PG_IP"
 
-# Test connection
-log "🔌 Testing database connection..."
+# Test connection with superuser
+log "🔌 Testing database connection as superuser..."
 kubectl run connection-test --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
     --env="PGPASSWORD=$POSTGRES_PASSWORD" \
     --env="PGHOST=$PG_IP" \
-    --env="PGUSER=$POSTGRES_USER" \
-    --env="PGDATABASE=$POSTGRES_DATABASE" \
+    --env="PGUSER=postgres" \
+    --env="PGDATABASE=postgres" \
     --timeout=60s \
     -- psql -c "SELECT current_database(), current_user, version();" || {
     log "❌ Connection test failed"
@@ -298,33 +234,35 @@ kubectl run connection-test --image=postgres:15-alpine -n "$NAMESPACE" --rm -i -
 
 log "✅ Database connection successful"
 
-# Setup database
+# Setup database and create app user
 log "🗄️ Setting up benchmark database..."
 kubectl run setup-db --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
   --env="PGPASSWORD=$POSTGRES_PASSWORD" \
   --env="PGHOST=$PG_IP" \
-  --env="PGUSER=$POSTGRES_USER" \
-  --env="PGDATABASE=$POSTGRES_DATABASE" \
+  --env="PGUSER=postgres" \
+  --env="PGDATABASE=postgres" \
   --timeout=300s \
   -- bash -c '
 set -e
-echo "Connected to database: $PGDATABASE as user: $PGUSER"
+echo "=== Database Setup ==="
+echo "Connected as superuser to PostgreSQL"
 
-# Create app database and user if using superuser
-if [ "$PGUSER" = "postgres" ]; then
-    echo "Creating app database and user..."
-    psql -c "CREATE DATABASE app;" 2>/dev/null || echo "Database app already exists"
-    psql -c "CREATE USER app WITH ENCRYPTED PASSWORD '"'"'apppass123'"'"';" 2>/dev/null || echo "User app already exists"
-    psql -c "GRANT ALL PRIVILEGES ON DATABASE app TO app;"
-    psql -c "ALTER USER app CREATEDB;"
-    
-    # Switch to app database
-    export PGDATABASE=app
-    export PGUSER=app
-    export PGPASSWORD=apppass123
-fi
+# Create app database and user
+echo "Creating app database and user..."
+psql -c "CREATE DATABASE app;" 2>/dev/null || echo "Database app already exists"
+psql -c "CREATE USER app WITH ENCRYPTED PASSWORD '"'"'benchmarkpass123'"'"';" 2>/dev/null || echo "User app already exists"  
+psql -c "GRANT ALL PRIVILEGES ON DATABASE app TO app;"
+psql -c "ALTER USER app CREATEDB;"
 
-echo "Initializing pgbench in database: $PGDATABASE"
+# Switch to app database and initialize pgbench
+export PGDATABASE=app
+export PGUSER=app
+export PGPASSWORD=benchmarkpass123
+
+echo "Connecting to app database as app user..."
+psql -c "SELECT current_database(), current_user;"
+
+echo "Initializing pgbench..."
 pgbench -i -s 10 -q
 
 echo "✅ pgbench tables created"
@@ -332,17 +270,19 @@ psql -c "\dt pgbench*"
 
 ROW_COUNT=$(psql -t -c "SELECT count(*) FROM pgbench_accounts;" | tr -d " ")
 echo "✅ Created $ROW_COUNT accounts for benchmarking"
+
+echo "=== Database setup completed successfully ==="
 ' || {
     log "❌ Database setup failed"
     exit 1
 }
 
-# Update credentials if we created app user
-if [ "$POSTGRES_USER" = "postgres" ]; then
-    POSTGRES_USER="app"
-    POSTGRES_PASSWORD="apppass123"
-    POSTGRES_DATABASE="app"
-fi
+# Now use app credentials for benchmarking
+POSTGRES_USER="app"
+POSTGRES_PASSWORD="benchmarkpass123"
+POSTGRES_DATABASE="app"
+
+log "✅ Database setup completed, switching to app user"
 
 # Run comprehensive benchmark
 log "🚀 Running comprehensive PostgreSQL benchmark..."
@@ -398,11 +338,11 @@ run_pgbench "High Concurrency: 50 Clients (60 seconds)" -c 50 -j 12 -T 60 -P 10
 # Sustained load test
 run_pgbench "Sustained Load: 10 Clients (300 seconds)" -c 10 -j 4 -T 300 -P 30
 
-# FIXED Write-heavy test - avoid primary key conflicts
+# Fixed Write-heavy test
 echo "=== Write-Heavy: Fixed Custom Script (60 seconds) ==="
 cat > /tmp/write_heavy_fixed.sql << '"'"'EOF'"'"'
--- Fixed write-heavy test that avoids primary key conflicts
-UPDATE pgbench_accounts SET abalance = abalance + 100 WHERE aid = (random() * 100000)::int;
+-- Safe write operations that avoid primary key conflicts
+UPDATE pgbench_accounts SET abalance = abalance + (random() * 100)::int WHERE aid = (random() * 100000)::int + 1;
 INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES 
     ((random() * 10)::int + 1, (random() * 10)::int + 1, (random() * 100000)::int + 1, (random() * 1000)::int, CURRENT_TIMESTAMP);
 UPDATE pgbench_tellers SET tbalance = tbalance + (random() * 100)::int WHERE tid = (random() * 10)::int + 1;
@@ -478,9 +418,8 @@ kubectl delete namespace "$NAMESPACE" --timeout=60s &>/dev/null || {
     kubectl delete namespace "$NAMESPACE" --force --grace-period=0 &>/dev/null || true
 }
 
-log "✅ Fixed benchmark completed successfully!"
-log "📁 Results saved to:"
-log "   Log file: $LOG_FILE"
+log "✅ Working benchmark completed successfully!"
+log "📁 Results saved to: $LOG_FILE"
 
 echo ""
 echo "🎯 Benchmark Summary:"
@@ -496,7 +435,8 @@ grep -E "📊 RESULT:" "$LOG_FILE" | head -10 || echo "No summary data found"
 
 echo ""
 echo "🔬 For your research paper:"
+echo "   - Uses CNPG default superuser credentials"
+echo "   - Creates app user with known password"
 echo "   - All TPS values extracted and logged"
-echo "   - Fixed write-heavy test (no more primary key conflicts)"
-echo "   - Works on both cVM and regular VM"
-echo "   - Ready for performance comparison analysis"
+echo "   - Fixed write-heavy test (no conflicts)"
+echo "   - Works consistently on both VM types"
