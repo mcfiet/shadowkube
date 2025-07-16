@@ -39,7 +39,7 @@ metadata:
   name: postgres
   namespace: $NAMESPACE
 spec:
-  instances: 1
+  instances: 3
   storage:
     storageClass: openebs-hostpath
     size: 1Gi
