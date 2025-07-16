@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 echo "🏗️ Starte initiales Setup"
-cp scripts/*.sh /usr/local/bin/
+cp scripts/cVM/*.sh /usr/local/bin/
 chmod +x /usr/local/bin/*.sh
 
 cp systemd/*.service /etc/systemd/system/
