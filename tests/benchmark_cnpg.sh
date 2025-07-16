@@ -1,39 +1,37 @@
 #!/bin/bash
 set -e
 
-# CNPG Benchmark using the postgres-app secret that CNPG creates
 NODE_NAME=$(hostname)
 
-# Auto-detect VM type
-if dmesg 2>/dev/null | grep -qi "Memory Encryption Features active: AMD SEV"; then
+# Simple VM type detection (handle dmesg permission issues)
+if dmesg 2>/dev/null | grep -qi "Memory Encryption Features active: AMD SEV" 2>/dev/null; then
     CVM_TYPE="confidential"
-elif dmesg 2>/dev/null | grep -qi "AMD Memory Encryption"; then
+elif dmesg 2>/dev/null | grep -qi "AMD Memory Encryption" 2>/dev/null; then
     CVM_TYPE="confidential"
 else
     CVM_TYPE="regular"
 fi
 
+echo "🚀 Perfect CNPG Benchmark - $NODE_NAME ($CVM_TYPE VM)"
+
 NAMESPACE="benchmark-perfect"
-LOG_FILE="/tmp/benchmark-${NODE_NAME}-$(date +%Y%m%d-%H%M%S).log"
 
-# Logging function
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a "$LOG_FILE"
-}
+# Cleanup - exactly like your original
+if kubectl get namespace $NAMESPACE &>/dev/null; then
+  echo "🧹 Vorheriges Cluster und Namespace $NAMESPACE entfernen…"
+  kubectl delete cluster postgres -n "$NAMESPACE" \
+    --force --grace-period=0 --ignore-not-found || true
+  kubectl patch cluster postgres -n $NAMESPACE \
+    -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+  kubectl delete namespace "$NAMESPACE" \
+    --force --grace-period=0 --ignore-not-found || true
+  kubectl patch namespace $NAMESPACE \
+    -p '{"metadata":{"finalizers":[]}}' --type=merge || true
+fi
 
-log "🚀 CNPG App Benchmark - $NODE_NAME ($CVM_TYPE VM)"
+kubectl create namespace $NAMESPACE
 
-# Clean up first
-log "🧹 Quick cleanup..."
-kubectl delete namespace "$NAMESPACE" --force --grace-period=0 &>/dev/null || true
-sleep 5
-
-# Create namespace
-log "📦 Creating namespace..."
-kubectl create namespace "$NAMESPACE"
-
-# Create simple cluster that will create postgres-app secret
-log "🗄️ Creating PostgreSQL cluster..."
+# Create cluster - exactly like your original
 cat <<EOF | kubectl apply -f -
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
@@ -43,6 +41,7 @@ metadata:
 spec:
   instances: 1
   storage:
+    storageClass: openebs-hostpath
     size: 1Gi
   bootstrap:
     initdb:
@@ -50,262 +49,155 @@ spec:
       owner: app
 EOF
 
-# Wait for cluster
-log "⏳ Waiting for cluster to be ready..."
-kubectl wait --for=condition=Ready cluster/postgres -n "$NAMESPACE" --timeout=300s
+echo "⏳ Waiting for PostgreSQL cluster..."
+kubectl wait --for=condition=Ready cluster/postgres -n $NAMESPACE --timeout=300s
+sleep 30
 
-# Wait for pods
-log "⏳ Waiting for pods to be ready..."
-kubectl wait --for=condition=Ready pod -l cnpg.io/cluster=postgres -n "$NAMESPACE" --timeout=300s
+# Get the app credentials - exactly like your original
+POSTGRES_PASSWORD=$(kubectl get secret postgres-app -n $NAMESPACE -o jsonpath='{.data.password}' | base64 -d)
+PG_IP=$(kubectl get svc postgres-rw -n $NAMESPACE -o jsonpath='{.spec.clusterIP}')
 
-log "✅ Cluster is ready!"
+echo "✅ Found credentials (user: app, password length: ${#POSTGRES_PASSWORD})"
+echo "📡 PostgreSQL service: $PG_IP"
 
-# Get service IP
-PG_IP=$(kubectl get svc postgres-rw -n "$NAMESPACE" -o jsonpath='{.spec.clusterIP}')
-log "📡 PostgreSQL service: $PG_IP"
-
-# Debug the postgres-app secret structure
-log "🔍 Analyzing postgres-app secret structure..."
-kubectl get secret postgres-app -n "$NAMESPACE" -o yaml | head -20
-
-# Get credentials from postgres-app secret
-log "🔑 Getting credentials from postgres-app secret..."
-
-# Let's see what fields are actually in the secret
-log "Fields in postgres-app secret:"
-kubectl get secret postgres-app -n "$NAMESPACE" -o jsonpath='{.data}' | jq -r 'keys[]' 2>/dev/null || {
-    log "Using base64 to check fields..."
-    kubectl get secret postgres-app -n "$NAMESPACE" -o yaml | grep "  [a-zA-Z]" | cut -d: -f1 | sed 's/  //'
-}
-
-# Try to get username and password with various field names
-APP_USER=""
-APP_PASSWORD=""
-
-# Common field names for username
-for field in username user owner dbname; do
-    if TEMP_USER=$(kubectl get secret postgres-app -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null | base64 -d 2>/dev/null); then
-        if [ -n "$TEMP_USER" ]; then
-            APP_USER="$TEMP_USER"
-            log "Found username in field '$field': $APP_USER"
-            break
-        fi
-    fi
-done
-
-# Common field names for password  
-for field in password pass pwd; do
-    if TEMP_PASSWORD=$(kubectl get secret postgres-app -n "$NAMESPACE" -o jsonpath="{.data.$field}" 2>/dev/null | base64 -d 2>/dev/null); then
-        if [ -n "$TEMP_PASSWORD" ]; then
-            APP_PASSWORD="$TEMP_PASSWORD"
-            log "Found password in field '$field' (length: ${#APP_PASSWORD})"
-            break
-        fi
-    fi
-done
-
-# Fallback to default values if not found
-APP_USER=${APP_USER:-"app"}
-APP_DATABASE=${APP_DATABASE:-"app"}
-
-if [ -z "$APP_PASSWORD" ]; then
-    log "❌ Could not find password in postgres-app secret"
-    log "Secret contents (field names only):"
-    kubectl get secret postgres-app -n "$NAMESPACE" -o yaml
-    exit 1
-fi
-
-log "✅ Using credentials: $APP_USER / password(${#APP_PASSWORD} chars) / database: $APP_DATABASE"
-
-# Test connection
-log "🔌 Testing database connection..."
-kubectl run test-connection --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
-    --env="PGPASSWORD=$APP_PASSWORD" \
-    --env="PGHOST=$PG_IP" \
-    --env="PGUSER=$APP_USER" \
-    --env="PGDATABASE=$APP_DATABASE" \
-    --timeout=60s \
-    -- psql -c "SELECT current_database(), current_user, version();" || {
-    log "❌ Connection test failed with app credentials"
-    
-    # Try with postgres user as fallback
-    log "Trying with postgres user..."
-    kubectl run test-postgres --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
-        --env="PGPASSWORD=$APP_PASSWORD" \
-        --env="PGHOST=$PG_IP" \
-        --env="PGUSER=postgres" \
-        --env="PGDATABASE=postgres" \
-        --timeout=60s \
-        -- psql -c "SELECT current_database(), current_user, version();" || {
-        log "❌ Connection also failed with postgres user"
-        exit 1
-    }
-    
-    # Update credentials if postgres worked
-    APP_USER="postgres"
-    APP_DATABASE="postgres"
-}
-
-log "✅ Database connection successful"
-
-# Set up pgbench
-log "🗄️ Setting up pgbench..."
-kubectl run setup-pgbench --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
-  --env="PGPASSWORD=$APP_PASSWORD" \
+# Setup database - exactly like your original
+echo "🗄️ Setting up benchmark database..."
+kubectl run setup-db --image=postgres:15-alpine -n $NAMESPACE --rm -i --restart=Never \
+  --env="PGPASSWORD=$POSTGRES_PASSWORD" \
   --env="PGHOST=$PG_IP" \
-  --env="PGUSER=$APP_USER" \
-  --env="PGDATABASE=$APP_DATABASE" \
-  --timeout=300s \
+  --env="PGUSER=app" \
+  --env="PGDATABASE=app" \
   -- bash -c '
-set -e
+echo "Connected to app database"
+psql -c "SELECT current_database(), current_user;"
 
-echo "=== Setting up pgbench ==="
-echo "Connected to: $PGDATABASE as $PGUSER"
+echo "Initializing pgbench in app database..."
+pgbench -i -s 10 -q
 
-# Initialize pgbench
-echo "Initializing pgbench with scale factor 10..."
-if pgbench -i -s 10 -q; then
-    echo "✅ pgbench initialized successfully"
-    
-    # Verify tables
-    psql -c "\dt pgbench*"
-    
-    ROW_COUNT=$(psql -t -c "SELECT count(*) FROM pgbench_accounts;" | tr -d " ")
-    echo "✅ Created $ROW_COUNT accounts for benchmarking"
-    
-    echo "=== pgbench setup completed ==="
-else
-    echo "❌ pgbench initialization failed"
-    exit 1
-fi
-' || {
-    log "❌ pgbench setup failed"
-    exit 1
-}
+echo "✅ pgbench tables created in app database"
+psql -c "\dt pgbench*"
+'
 
-# Run comprehensive benchmark
-log "🚀 Running comprehensive PostgreSQL benchmark..."
-kubectl run pgbench-benchmark --image=postgres:15-alpine -n "$NAMESPACE" --rm -i --restart=Never \
-  --env="PGPASSWORD=$APP_PASSWORD" \
+# Run benchmark - your original with the fixed write-heavy test
+echo "🚀 Running PostgreSQL benchmark..."
+kubectl run pgbench-perfect --image=postgres:15-alpine -n $NAMESPACE --rm -i --restart=Never \
+  --env="PGPASSWORD=$POSTGRES_PASSWORD" \
   --env="PGHOST=$PG_IP" \
-  --env="PGUSER=$APP_USER" \
-  --env="PGDATABASE=$APP_DATABASE" \
-  --timeout=1800s \
+  --env="PGUSER=app" \
+  --env="PGDATABASE=app" \
   -- bash -c '
-set -e
-
 echo "=== PostgreSQL Performance Benchmark ==="
 echo "Node: '"$NODE_NAME"' ('"$CVM_TYPE"' VM)"
 echo "Host: $PGHOST"
 echo "Database: $PGDATABASE"
 echo "User: $PGUSER"
-echo "Timestamp: $(date)"
 echo ""
 
-# Function to run pgbench and extract TPS
-run_pgbench() {
-    local description="$1"
-    shift
-    echo "=== $description ==="
-    
-    local output=$(pgbench "$@" 2>&1)
-    echo "$output"
-    
-    # Extract TPS and latency
-    local tps=$(echo "$output" | grep "tps =" | tail -1 | sed "s/.*tps = \([0-9.]*\).*/\1/" || echo "N/A")
-    local latency=$(echo "$output" | grep "latency average =" | tail -1 | sed "s/.*latency average = \([0-9.]*\).*/\1/" || echo "N/A")
-    
-    echo "📊 RESULT: $description - TPS: $tps, Latency: ${latency}ms"
-    echo ""
-}
+echo "🚀 Running benchmark tests..."
 
-echo "🚀 Running comprehensive benchmark tests..."
-
-# Basic performance tests
-run_pgbench "Single Client Test (20 seconds)" -c 1 -j 1 -T 20 -P 5
-run_pgbench "5 Clients Test (20 seconds)" -c 5 -j 2 -T 20 -P 5  
-run_pgbench "10 Clients Test (20 seconds)" -c 10 -j 4 -T 20 -P 5
-run_pgbench "Read-Only Test (20 seconds)" -c 10 -j 4 -T 20 -S -P 5
-
-echo "=== RESEARCH BENCHMARKS ==="
+echo "=== Single Client Test (20 seconds) ==="
+pgbench -c 1 -j 1 -T 20 -P 5
+echo ""  
+echo "=== 5 Clients Test (20 seconds) ==="
+pgbench -c 5 -j 2 -T 20 -P 5
+echo ""
+echo "=== 10 Clients Test (20 seconds) ==="
+pgbench -c 10 -j 4 -T 20 -P 5
+echo ""
+echo "=== Read-Only Test (20 seconds) ==="
+pgbench -c 10 -j 4 -T 20 -S -P 5
 echo ""
 
-# High concurrency tests (critical for cVM vs regular VM comparison)
-run_pgbench "High Concurrency: 25 Clients (60 seconds)" -c 25 -j 8 -T 60 -P 10
-run_pgbench "High Concurrency: 50 Clients (60 seconds)" -c 50 -j 12 -T 60 -P 10
+echo "=== EXTENDED RESEARCH BENCHMARKS ==="
+echo ""
 
-# Sustained load test (important for confidential computing overhead)
-run_pgbench "Sustained Load: 10 Clients (300 seconds)" -c 10 -j 4 -T 300 -P 30
+echo "=== High Concurrency: 25 Clients (60 seconds) ==="
+pgbench -c 25 -j 8 -T 60 -P 10
+echo ""
 
-# Write-heavy test (uses standard TPC-B workload - no custom SQL)
-run_pgbench "Write-Heavy: TPC-B Workload (60 seconds)" -c 10 -j 4 -T 60 -P 10
+echo "=== High Concurrency: 50 Clients (60 seconds) ==="
+pgbench -c 50 -j 12 -T 60 -P 10
+echo ""
 
-# Mixed read/write test
-run_pgbench "Mixed Workload: Default TPC-B (120 seconds)" -c 15 -j 6 -T 120 -P 20
+echo "=== Sustained Load: 10 Clients (300 seconds) ==="
+pgbench -c 10 -j 4 -T 300 -P 30
+echo ""
 
-# Connection stress test
-run_pgbench "Connection Stress: 50 Connections (30 seconds)" -c 50 -j 10 -T 30 -P 5
+# FIXED Write-heavy test (the only change needed)
+echo "=== Write-Heavy: Fixed Custom Script (60 seconds) ==="
+cat > /tmp/write_heavy_fixed.sql << 'EOF'
+UPDATE pgbench_accounts SET abalance = abalance + 100 WHERE aid = (random() * 100000)::int + 1;
+INSERT INTO pgbench_history (tid, bid, aid, delta, mtime) VALUES 
+    ((random() * 10)::int + 1, (random() * 10)::int + 1, (random() * 100000)::int + 1, (random() * 1000)::int, CURRENT_TIMESTAMP);
+UPDATE pgbench_tellers SET tbalance = tbalance + (random() * 100)::int WHERE tid = (random() * 10)::int + 1;
+EOF
+pgbench -c 10 -j 4 -T 60 -f /tmp/write_heavy_fixed.sql -P 10
+echo ""
 
-# Prepared statements test
-run_pgbench "Prepared Statements Test (60 seconds)" -c 10 -j 4 -T 60 -M prepared -P 10
+echo "=== Large Transactions: Batch Updates (60 seconds) ==="
+cat > /tmp/large_transactions.sql << 'EOF'
+BEGIN;
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid BETWEEN 1 AND 1000;
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid BETWEEN 1001 AND 2000;
+UPDATE pgbench_accounts SET abalance = abalance + 1 WHERE aid BETWEEN 2001 AND 3000;
+COMMIT;
+EOF
+pgbench -c 5 -j 2 -T 60 -f /tmp/large_transactions.sql -P 10
+echo ""
 
-# Large dataset test
-run_pgbench "Large Dataset Test (60 seconds)" -c 10 -j 4 -T 60 -P 10
+echo "=== Complex Read Queries with Joins (60 seconds) ==="
+cat > /tmp/complex_reads.sql << 'EOF'
+SELECT a.aid, a.abalance, b.bbalance, t.tbalance 
+FROM pgbench_accounts a 
+JOIN pgbench_branches b ON a.bid = b.bid 
+JOIN pgbench_tellers t ON a.bid = t.bid 
+WHERE a.aid = (random() * 100000)::int + 1;
+EOF
+pgbench -c 10 -j 4 -T 60 -f /tmp/complex_reads.sql -P 10
+echo ""
 
-# Performance analysis
+echo "=== Mixed Workload: 70% Read, 30% Write (120 seconds) ==="
+cat > /tmp/mixed_workload.sql << 'EOF'
+\set aid random(1, 100000)
+\set bid random(1, 10)
+\set delta random(-5000, 5000)
+\set r random(1, 100)
+\if :r <= 70
+    SELECT abalance FROM pgbench_accounts WHERE aid = :aid;
+\else
+    UPDATE pgbench_accounts SET abalance = abalance + :delta WHERE aid = :aid;
+\endif
+EOF
+pgbench -c 15 -j 6 -T 120 -f /tmp/mixed_workload.sql -P 20
+echo ""
+
+echo "=== Connection Stress Test: 100 Connections (30 seconds) ==="
+pgbench -c 100 -j 20 -T 30 -P 5
+echo ""
+
+echo "=== Prepared Statements Test (60 seconds) ==="
+pgbench -c 10 -j 4 -T 60 -M prepared -P 10
+echo ""
+
 echo "=== Detailed Performance Analysis ==="
 echo "Database size:"
-psql -c "SELECT pg_size_pretty(pg_database_size(current_database())) as database_size;"
+psql -c "SELECT pg_size_pretty(pg_database_size('"'"'app'"'"'));"
 
 echo "Table sizes:"
-psql -c "SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename)) as size FROM pg_tables WHERE schemaname='"'"'public'"'"' ORDER BY pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename) DESC;"
+psql -c "SELECT schemaname,tablename,pg_size_pretty(pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename)) as size FROM pg_tables WHERE schemaname='"'"'public'"'"' ORDER BY pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename) DESC;"
 
 echo "Cache hit ratio:"
-psql -c "SELECT datname, round(blks_hit::float/(blks_hit+blks_read)*100, 2) as cache_hit_ratio FROM pg_stat_database WHERE datname = current_database();"
+psql -c "SELECT datname, round(blks_hit::float/(blks_hit+blks_read)*100, 2) as cache_hit_ratio FROM pg_stat_database WHERE datname = '"'"'app'"'"';"
 
-echo "Connection info:"
-psql -c "SELECT count(*) as active_connections FROM pg_stat_activity WHERE state = '"'"'active'"'"';"
+rm -f /tmp/write_heavy_fixed.sql /tmp/large_transactions.sql /tmp/complex_reads.sql /tmp/mixed_workload.sql
 
 echo ""
-echo "✅ Comprehensive PostgreSQL benchmark completed!"
+echo "✅ Enhanced PostgreSQL benchmark completed successfully!"
 echo "📊 All tests completed on '"$NODE_NAME"' ('"$CVM_TYPE"' VM)"
-' | tee -a "$LOG_FILE" || {
-    log "❌ Benchmark execution failed"
-    exit 1
-}
-
-# Cleanup
-log "🧹 Cleaning up resources..."
-kubectl delete namespace "$NAMESPACE" --timeout=60s &>/dev/null || {
-    kubectl patch namespace "$NAMESPACE" -p '{"metadata":{"finalizers":[]}}' --type=merge &>/dev/null || true
-    kubectl delete namespace "$NAMESPACE" --force --grace-period=0 &>/dev/null || true
-}
-
-log "✅ CNPG benchmark completed successfully!"
-log "📁 Full results saved to: $LOG_FILE"
+'
 
 echo ""
-echo "🎯 Benchmark Summary:"
-echo "   Node: $NODE_NAME ($CVM_TYPE VM)"
-echo "   Log file: $LOG_FILE"
-echo "   Status: ✅ Success"
-
-# Extract and display key results
-echo ""
-echo "📊 Performance Summary:"
-echo "----------------------------------------"
-grep -E "📊 RESULT:" "$LOG_FILE" | head -10 || echo "No results extracted"
-
-echo ""
-echo "🔬 For your research paper:"
-echo "   - Compare TPS values between confidential and regular VMs"
-echo "   - Focus on high concurrency and sustained load differences"
-echo "   - Analyze write-heavy workload performance impact"
-echo "   - Document connection handling and latency variations"
-
-echo ""
-echo "💾 Next steps:"
-echo "   1. Run this script on your regular VM setup"
-echo "   2. Compare the TPS results between both environments"
-echo "   3. Calculate performance overhead percentages"
-echo "   4. Include results in your research paper analysis"
+echo "🧹 Cleaning up resources..."
+kubectl delete namespace $NAMESPACE --force
+echo "🎉 Perfect CNPG PostgreSQL benchmark completed!"
+echo "📊 For detailed TPS numbers, check the pgbench output above"
