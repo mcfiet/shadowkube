@@ -17,6 +17,7 @@ echo "Setting up as $NODE_ROLE node..."
 # 1. Install packages
 echo "Installing packages..."
 sudo zypper refresh
+sudo zypper ar -f https://rpm.releases.hashicorp.com/RHEL/8/x86_64/stable hashicorp
 sudo zypper install -y cryptsetup wireguard-tools vault jq sevctl libvirt-client-qemu
 
 # 2. Enable basic services
