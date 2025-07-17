@@ -54,23 +54,10 @@
   "displayDevice": {
     "enableDisplay": false
   },
-  "fingerprint": "n_2ou2Aijr0=",
-  "id": "8952611756779600509",
   "keyRevocationActionType": "NONE",
   "kind": "compute#instance",
-  "labelFingerprint": "42WmSpB8rSM=",
   "lastStartTimestamp": "2025-07-17T02:38:35.930-07:00",
   "machineType": "projects/steam-style-463312-k4/zones/europe-north1-c/machineTypes/n2d-standard-2",
-  "metadata": {
-    "fingerprint": "n-Cbign1OdM=",
-    "kind": "compute#metadata",
-    "items": [
-      {
-        "value": "fietescheel:ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBDmTjz49K+SeDI6lxRO8kuFRKIjlnzELmVREiFLa9gtqz5Rak175DmXa2Wk2sqgy+X/xZCx/0vJ6qMKGBIJ7imo= google-ssh {\"userName\":\"fietescheel@gmail.com\",\"expireOn\":\"2025-07-17T14:45:41+0000\"}\nfietescheel:ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAHv7kqWwQR1vhKH9IrwnskpRMY27jXvEqYXNpFCI3I/XIbNAPHBJFN80TX71eL6lDP/N+7j4JP+bFWGc8Ht6AMlj2FWm3wMZemYTZl9shEgQIgMXUh4o6A9bMq6D3MksITmxSz1u7rL81BDnHiB+6U03AXErPkqaKbc69s1mPBm6uj01dTQpofi/4vgIgubMdQA6bWavjsVIJPPxq2+L8RdCAfdY2BnE84I89zkKQwsbAtmU2JQBLi0qPpkoNyigEBunmoUpIHqHL6AhICCqQMB19aTtiSVg9ATQnG3KGExISYzlLtA9kpvNF54OCDqVtq6B/5fCzD7r6luZCzgpazM= google-ssh {\"userName\":\"fietescheel@gmail.com\",\"expireOn\":\"2025-07-17T14:45:46+0000\"}",
-        "key": "ssh-keys"
-      }
-    ]
-  },
   "minCpuPlatform": "AMD Milan",
   "name": "pos-sec-1",
   "networkInterfaces": [
