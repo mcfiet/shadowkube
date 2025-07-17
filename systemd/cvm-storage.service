@@ -1,5 +1,5 @@
 [Unit]
-Description=cVM Encrypted Storage with Reboot Safety
+Description=cVM Encrypted Storage with OpenEBS Support
 After=cvm-secrets-enhanced.service
 Requires=cvm-secrets-enhanced.service
 Before=rke2-agent.service rke2-server.service wg-quick@wg0.service
@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c '\
     set -e; \
-    echo "Setting up cVM encrypted storage..."; \
+    echo "Setting up cVM encrypted storage with OpenEBS..."; \
     \
     # Check if secrets are available \
     if [ ! -f /run/cvm-secrets/luks.key ]; then \
@@ -20,7 +20,7 @@ ExecStart=/bin/bash -c '\
     # Create encrypted image if not exists \
     if [ ! -f /var/lib/cvm-storage.img ]; then \
         echo "Creating new encrypted storage..."; \
-        dd if=/dev/zero of=/var/lib/cvm-storage.img bs=1M count=10240 status=progress; \
+        dd if=/dev/zero of=/var/lib/cvm-storage.img bs=1M count=20480 status=progress; \
         \
         LOOP_DEV=$(losetup -f); \
         losetup $LOOP_DEV /var/lib/cvm-storage.img; \
@@ -34,46 +34,71 @@ ExecStart=/bin/bash -c '\
     # Check if already mounted (reboot safety) \
     if mountpoint -q /var/lib/rancher; then \
         echo "✅ Encrypted storage already mounted"; \
-        exit 0; \
+        # Still need to check OpenEBS mounts \
+    else \
+        # Mount encrypted storage \
+        LOOP_DEV=$(losetup -f); \
+        losetup $LOOP_DEV /var/lib/cvm-storage.img; \
+        \
+        # Try to open LUKS container \
+        if ! cryptsetup luksOpen $LOOP_DEV cvm-storage --key-file /run/cvm-secrets/luks.key; then \
+            echo "❌ Failed to open LUKS container"; \
+            losetup -d $LOOP_DEV; \
+            exit 1; \
+        fi; \
+        \
+        # Create filesystem if needed \
+        if ! blkid /dev/mapper/cvm-storage >/dev/null 2>&1; then \
+            echo "Creating filesystem..."; \
+            mkfs.ext4 /dev/mapper/cvm-storage; \
+        fi; \
+        \
+        # Mount filesystem \
+        mkdir -p /var/lib/rancher; \
+        mount /dev/mapper/cvm-storage /var/lib/rancher; \
+        \
+        # Store loop device for cleanup \
+        echo $LOOP_DEV > /var/run/cvm-loop-device; \
     fi; \
     \
-    # Mount encrypted storage \
-    LOOP_DEV=$(losetup -f); \
-    losetup $LOOP_DEV /var/lib/cvm-storage.img; \
-    \
-    # Try to open LUKS container \
-    if ! cryptsetup luksOpen $LOOP_DEV cvm-storage --key-file /run/cvm-secrets/luks.key; then \
-        echo "❌ Failed to open LUKS container"; \
-        losetup -d $LOOP_DEV; \
-        exit 1; \
-    fi; \
-    \
-    # Create filesystem if needed \
-    if ! blkid /dev/mapper/cvm-storage >/dev/null 2>&1; then \
-        echo "Creating filesystem..."; \
-        mkfs.ext4 /dev/mapper/cvm-storage; \
-    fi; \
-    \
-    # Mount filesystem \
-    mkdir -p /var/lib/rancher; \
-    mount /dev/mapper/cvm-storage /var/lib/rancher; \
-    \
-    # Create necessary directories \
+    # Create ALL necessary directories in encrypted storage \
     mkdir -p /var/lib/rancher/{etc-rancher,etc-wireguard,rke2,kubelet}; \
+    mkdir -p /var/lib/rancher/openebs/{local,config,logs,backup}; \
     mkdir -p /etc/{rancher,wireguard}; \
+    mkdir -p /var/openebs; \
     \
-    # Setup bind mounts \
+    # Setup bind mounts for configs \
     if ! mountpoint -q /etc/rancher; then \
         mount --bind /var/lib/rancher/etc-rancher /etc/rancher; \
+        echo "✅ /etc/rancher bind mounted to encrypted storage"; \
     fi; \
+    \
     if ! mountpoint -q /etc/wireguard; then \
         mount --bind /var/lib/rancher/etc-wireguard /etc/wireguard; \
+        echo "✅ /etc/wireguard bind mounted to encrypted storage"; \
     fi; \
     \
-    # Store loop device for cleanup \
-    echo $LOOP_DEV > /var/run/cvm-loop-device; \
+    # CRITICAL: Setup encrypted OpenEBS storage \
+    if ! mountpoint -q /var/openebs; then \
+        mount --bind /var/lib/rancher/openebs /var/openebs; \
+        echo "✅ /var/openebs bind mounted to encrypted storage"; \
+    fi; \
     \
-    echo "✅ cVM encrypted storage ready and mounted"'
+    # Create OpenEBS subdirectories with correct permissions \
+    mkdir -p /var/openebs/{local,config,logs,backup,hostpath}; \
+    chown -R 1000:1000 /var/openebs; \
+    chmod -R 755 /var/openebs; \
+    \
+    # Create OpenEBS config directory structure \
+    mkdir -p /var/openebs/local/{pv,hostpath}; \
+    mkdir -p /var/openebs/config/{pools,volumes}; \
+    \
+    echo "✅ OpenEBS encrypted storage configured"; \
+    echo "   OpenEBS local: /var/openebs/local (encrypted)"; \
+    echo "   OpenEBS config: /var/openebs/config (encrypted)"; \
+    echo "   OpenEBS logs: /var/openebs/logs (encrypted)"; \
+    \
+    echo "✅ cVM encrypted storage ready and mounted with full OpenEBS support"'
 
 ExecStop=/bin/bash -c '\
     echo "Unmounting cVM encrypted storage..."; \
@@ -81,25 +106,30 @@ ExecStop=/bin/bash -c '\
     # Get loop device \
     LOOP_DEV=$(cat /var/run/cvm-loop-device 2>/dev/null || echo ""); \
     \
-    # Unmount bind mounts \
+    # Unmount ALL bind mounts \
     umount /etc/rancher 2>/dev/null || true; \
     umount /etc/wireguard 2>/dev/null || true; \
+    umount /var/openebs 2>/dev/null || true; \
+    echo "✅ All bind mounts unmounted"; \
     \
     # Unmount encrypted storage \
     umount /var/lib/rancher 2>/dev/null || true; \
+    echo "✅ Encrypted storage unmounted"; \
     \
     # Close LUKS container \
     cryptsetup luksClose cvm-storage 2>/dev/null || true; \
+    echo "✅ LUKS container closed"; \
     \
     # Remove loop device \
     if [ -n "$LOOP_DEV" ]; then \
         losetup -d $LOOP_DEV 2>/dev/null || true; \
+        echo "✅ Loop device removed"; \
     fi; \
     \
     # Cleanup \
     rm -f /var/run/cvm-loop-device; \
     \
-    echo "✅ cVM encrypted storage unmounted"'
+    echo "✅ cVM encrypted storage completely unmounted"'
 
 Restart=on-failure
 RestartSec=10
