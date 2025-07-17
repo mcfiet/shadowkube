@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 OPENEBS_NAMESPACE="openebs"
 LOCAL_PATH="/var/openebs/local"
