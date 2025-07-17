@@ -17,7 +17,7 @@ echo "Setting up as $NODE_ROLE node..."
 # 1. Install packages
 echo "Installing packages..."
 sudo zypper refresh
-sudo zypper install -y cryptsetup wireguard-tools vault jq
+sudo zypper install -y cryptsetup wireguard-tools vault jq sevctl libvirt-client-qemu
 
 # 2. Enable basic services
 sudo systemctl enable cvm-secrets-enhanced.service 2>/dev/null || echo "Service will be created"
