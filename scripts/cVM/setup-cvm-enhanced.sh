@@ -34,15 +34,16 @@ gpg --no-default-keyring --keyring /usr/share/keyrings/hashicorp-archive-keyring
 # Import to RPM database (SUSE specific)
 sudo rpm --import https://rpm.releases.hashicorp.com/gpg
 
-# Add the HashiCorp repository
+# Add the HashiCorp repository (remove if exists)
+sudo zypper rr hashicorp 2>/dev/null || true
 sudo zypper ar -f https://rpm.releases.hashicorp.com/RHEL/8/x86_64/stable hashicorp
 
 # Refresh and install HashiCorp packages
 sudo zypper refresh
 sudo zypper install -y vault
 
-# Install SEV tools (optional)
-sudo zypper install -y sevctl libvirt-client-qemu || echo "⚠️ SEV tools not available"
+# Install SEV tools (they should work)
+sudo zypper install -y sevctl libvirt-client-qemu
 
 # 2. Enable basic services
 sudo systemctl enable cvm-secrets-enhanced.service 2>/dev/null || echo "Service will be created"
