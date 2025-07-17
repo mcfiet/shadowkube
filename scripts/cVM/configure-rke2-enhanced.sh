@@ -35,7 +35,8 @@ check_prerequisites() {
 
 # Install RKE2
 install_rke2() {
-    if command -v rke2 >/dev/null 2>&1; then
+    # Check if RKE2 binaries exist
+    if [ -f /usr/local/bin/rke2 ] || [ -f /var/lib/rancher/rke2/bin/rke2 ]; then
         log "RKE2 already installed, skipping installation"
         return 0
     fi
@@ -43,14 +44,37 @@ install_rke2() {
     log "Installing RKE2..."
     
     # Download and install RKE2
-    curl -sfL https://get.rke2.io | sh - || die "Failed to install RKE2"
+    curl -sfL https://get.rke2.io | sh - 
     
-    # Verify installation
-    if ! command -v rke2 >/dev/null 2>&1; then
-        die "RKE2 installation failed"
+    # Check installation result
+    if [ $? -ne 0 ]; then
+        die "RKE2 installation script failed"
     fi
     
-    log "RKE2 installed successfully"
+    # Verify installation - check common locations
+    if [ -f /usr/local/bin/rke2 ]; then
+        log "RKE2 installed to /usr/local/bin/rke2"
+    elif [ -f /var/lib/rancher/rke2/bin/rke2 ]; then
+        log "RKE2 installed to /var/lib/rancher/rke2/bin/rke2"
+        # Create symlink for easier access
+        sudo ln -sf /var/lib/rancher/rke2/bin/rke2 /usr/local/bin/rke2 2>/dev/null || true
+    else
+        # Try to find rke2 binary
+        RKE2_PATH=$(find /usr/local /var/lib/rancher -name "rke2" -type f 2>/dev/null | head -1)
+        if [ -n "$RKE2_PATH" ]; then
+            log "Found RKE2 at: $RKE2_PATH"
+            sudo ln -sf "$RKE2_PATH" /usr/local/bin/rke2 2>/dev/null || true
+        else
+            die "RKE2 binary not found after installation"
+        fi
+    fi
+    
+    # Final verification
+    if command -v rke2 >/dev/null 2>&1; then
+        log "RKE2 installed successfully: $(rke2 --version | head -1)"
+    else
+        die "RKE2 installation verification failed"
+    fi
 }
 
 # Get network configuration
@@ -228,17 +252,60 @@ EOF
     
     chmod 600 "$RKE2_DIR/config.yaml"
     
+    # Check if systemd service exists, if not create it
+    if [ ! -f /etc/systemd/system/rke2-agent.service ] && [ ! -f /usr/lib/systemd/system/rke2-agent.service ]; then
+        log "Creating RKE2 agent systemd service..."
+        
+        sudo tee /etc/systemd/system/rke2-agent.service > /dev/null << 'EOF'
+[Unit]
+Description=Rancher Kubernetes Engine v2 (agent)
+Documentation=https://rancher.com/docs/rke2/latest/en/
+Wants=network-online.target
+After=network-online.target
+Conflicts=rke2-server.service
+
+[Install]
+WantedBy=multi-user.target
+
+[Service]
+Type=notify
+EnvironmentFile=-/etc/default/%N
+EnvironmentFile=-/etc/sysconfig/%N
+EnvironmentFile=-/usr/local/lib/systemd/system/%N.env
+KillMode=process
+Delegate=yes
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+TimeoutStartSec=0
+Restart=always
+RestartSec=5s
+ExecStartPre=/bin/sh -xc '! /usr/bin/systemctl is-enabled --quiet nm-cloud-setup.service 2>/dev/null'
+ExecStartPre=-/sbin/modprobe br_netfilter
+ExecStartPre=-/sbin/modprobe overlay
+ExecStart=/usr/local/bin/rke2 agent
+EOF
+        
+        sudo systemctl daemon-reload
+    fi
+    
     # Enable and start RKE2 agent
     systemctl enable rke2-agent.service
     
     log "Starting RKE2 agent..."
     systemctl start rke2-agent.service
     
-    # Wait for agent to connect
+    # Wait for agent to connect with better error handling
     log "Waiting for RKE2 agent to connect to master..."
-    for i in {1..30}; do
+    for i in {1..60}; do
         if systemctl is-active --quiet rke2-agent.service; then
             log "RKE2 agent is running!"
+            break
+        fi
+        if [ $i -eq 60 ]; then
+            log "RKE2 agent taking longer than expected. Checking status..."
+            systemctl status rke2-agent.service --no-pager -l
             break
         fi
         echo -n "."
@@ -265,6 +332,7 @@ EOF
     echo "📋 Next steps:"
     echo "  • Check node status from master: kubectl get nodes"
     echo "  • View logs: journalctl -fu rke2-agent"
+    echo "  • Check service: systemctl status rke2-agent"
     echo ""
     echo "💡 All configurations stored in encrypted storage"
 }
