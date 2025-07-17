@@ -3,16 +3,82 @@
 
 echo "=== Simplified cVM Setup Order ==="
 
-NODE_ROLE="${1:-master}"
+# Check parameters
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "Usage: $0 <master|worker> [vault_token]"
+    echo "Example: $0 master hvs.XXXXXXXXXXXX"
+    exit 1
+fi
+
+NODE_ROLE="$1"
+VAULT_TOKEN="$2"
 
 echo "🎯 Setting up $NODE_ROLE node..."
 
 # Step 1: Initial setup (packages, services)
 echo "📦 Step 1: Initial setup..."
-sudo /usr/local/bin/setup-cvm-enhanced.sh $NODE_ROLE
+
+# Minimal package installation
+echo "Installing packages..."
+sudo zypper refresh
+sudo zypper install -y cryptsetup wireguard-tools jq curl gpg2
+
+# HashiCorp repository setup
+echo "Setting up HashiCorp repository..."
+sudo mkdir -p /usr/share/keyrings
+curl -fsSL https://rpm.releases.hashicorp.com/gpg | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+sudo rpm --import https://rpm.releases.hashicorp.com/gpg
+sudo zypper ar -f https://rpm.releases.hashicorp.com/RHEL/8/x86_64/stable hashicorp
+sudo zypper refresh
+sudo zypper install -y vault
+
+# SEV tools (optional)
+sudo zypper install -y sevctl libvirt-client-qemu || echo "⚠️ SEV tools not available"
+
+# Vault environment
+sudo mkdir -p /etc/vault.d
+echo 'VAULT_ADDR=https://vhsm.enclaive.cloud/' | sudo tee /etc/vault.d/vault.env
+export VAULT_ADDR=https://vhsm.enclaive.cloud/
+
+# Service dependencies
+sudo mkdir -p /etc/systemd/system/{rke2-agent,rke2-server,wg-quick@wg0}.service.d
+for service in rke2-agent rke2-server wg-quick@wg0; do
+    sudo tee /etc/systemd/system/${service}.service.d/override.conf > /dev/null << EOF
+[Unit]
+After=cvm-storage.service
+Requires=cvm-storage.service
+EOF
+done
+sudo systemctl daemon-reload
 
 # Step 2: Attestation + Vault authentication + Secret generation  
 echo "🔐 Step 2: Attestation and Vault authentication..."
+
+# Handle Vault token
+if [ -z "$VAULT_TOKEN" ]; then
+    echo "Please enter your Vault token:"
+    read -s VAULT_TOKEN
+fi
+
+# Set Vault environment and login
+export VAULT_ADDR=https://vhsm.enclaive.cloud/
+
+echo "Logging into Vault..."
+echo "$VAULT_TOKEN" | vault login -address https://vhsm.enclaive.cloud/ -
+
+# Verify login
+if ! vault token lookup >/dev/null 2>&1; then
+    echo "❌ Vault login failed"
+    exit 1
+fi
+
+echo "✅ Vault login successful"
+
+# Copy token for scripts that need it
+sudo mkdir -p /root
+sudo cp ~/.vault-token /root/.vault-token
+
+# Run attestation and auth
 sudo /usr/local/bin/vhsm-cvm-auth-enhanced.sh $NODE_ROLE
 
 # Step 3: Get secrets from Vault (including LUKS keys)
