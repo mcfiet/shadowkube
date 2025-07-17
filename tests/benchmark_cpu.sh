@@ -201,7 +201,7 @@ run_fileio_benchmarks() {
     log "💾 Running file I/O benchmarks..."
     
     # Create test directory
-    TEST_DIR="/tmp/sysbench-fileio-$$"
+    TEST_DIR="/var/openebs/benchmark-test-$$"
     mkdir -p "$TEST_DIR"
     cd "$TEST_DIR"
     
