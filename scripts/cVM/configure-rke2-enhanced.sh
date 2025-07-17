@@ -184,11 +184,27 @@ EOF
         die "RKE2 server failed to start within 5 minutes"
     fi
     
-    # Setup kubectl for root
+    # Setup kubectl for root and current user
     log "Setting up kubectl configuration"
-    mkdir -p ~/.kube
-    cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
-    chown $(id -u):$(id -g) ~/.kube/config
+    
+    # For root user
+    mkdir -p /root/.kube
+    cp /etc/rancher/rke2/rke2.yaml /root/.kube/config
+    chown root:root /root/.kube/config
+    chmod 600 /root/.kube/config
+    
+    # For current user (if not root)
+    if [ "$USER" != "root" ] && [ -n "$SUDO_USER" ]; then
+        REAL_USER="$SUDO_USER"
+        REAL_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+        
+        mkdir -p "$REAL_HOME/.kube"
+        cp /etc/rancher/rke2/rke2.yaml "$REAL_HOME/.kube/config"
+        chown "$REAL_USER:$(id -gn $REAL_USER)" "$REAL_HOME/.kube/config"
+        chmod 600 "$REAL_HOME/.kube/config"
+        
+        log "Kubeconfig setup for user: $REAL_USER"
+    fi
     
     # Add RKE2 binaries to PATH
     if ! grep -q "/var/lib/rancher/rke2/bin" ~/.bashrc; then
@@ -200,8 +216,30 @@ EOF
     ln -sf /var/lib/rancher/rke2/bin/kubectl /usr/local/bin/kubectl 2>/dev/null || true
     ln -sf /var/lib/rancher/rke2/bin/crictl /usr/local/bin/crictl 2>/dev/null || true
     
-    # Read the node token for workers
+    # Read the node token for workers and update Vault
     RKE2_TOKEN=$(cat /var/lib/rancher/rke2/server/node-token)
+    
+    # Update Vault with the REAL RKE2 token
+    log "Updating Vault with real RKE2 token..."
+    export VAULT_ADDR=https://vhsm.enclaive.cloud/
+    
+    # Update master cluster info with real token
+    vault write -namespace=team-msc cubbyhole/cluster-info/master \
+        master_hostname="$HOSTNAME" \
+        master_internal_ip="$NODE_IP" \
+        master_external_ip="$EXTERNAL_IP" \
+        k8s_join_token="$RKE2_TOKEN" \
+        cluster_created="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        real_token_updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    
+    # Also update the node-specific token
+    vault write -namespace=team-msc cubbyhole/cvm-cluster/$HOSTNAME-kubernetes \
+        token="$RKE2_TOKEN" \
+        purpose="k8s_master_real_token" \
+        node_role="master" \
+        updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    
+    log "Vault updated with real RKE2 token"
     
     # Summary
     echo -e "\n=== RKE2 Master Setup Complete ==="
@@ -222,14 +260,28 @@ EOF
 setup_worker() {
     log "Configuring RKE2 WORKER/AGENT"
     
-    # Read secrets
-    K8S_TOKEN=$(cat /run/cvm-secrets/k8s.token)
-    MASTER_IP=$(cat /run/cvm-secrets/master.ip 2>/dev/null || echo "unknown")
-    HOSTNAME=$(hostname)
+    # Get the REAL token from Vault (updated by master)
+    export VAULT_ADDR=https://vhsm.enclaive.cloud/
     
-    if [ "$MASTER_IP" = "unknown" ]; then
-        die "Master IP not found! Worker needs master IP in /run/cvm-secrets/master.ip"
+    log "Getting real RKE2 token from master..."
+    MASTER_INFO=$(vault read -namespace=team-msc -format=json cubbyhole/cluster-info/master 2>/dev/null || echo "{}")
+    
+    if [ "$(echo $MASTER_INFO | jq -r '.data')" = "null" ]; then
+        die "Master cluster info not found in Vault! Setup master first."
     fi
+    
+    # Use the REAL token from the master
+    K8S_TOKEN=$(echo $MASTER_INFO | jq -r '.data.k8s_join_token')
+    MASTER_IP=$(echo $MASTER_INFO | jq -r '.data.master_internal_ip')
+    
+    if [ "$K8S_TOKEN" = "null" ] || [ "$K8S_TOKEN" = "" ]; then
+        die "Real RKE2 token not found in Vault! Master may not be fully started."
+    fi
+    
+    log "Using real RKE2 token from master"
+    log "Master IP: $MASTER_IP"
+    
+    HOSTNAME=$(hostname)
     
     # Create RKE2 directory in encrypted storage
     mkdir -p "$RKE2_DIR"
