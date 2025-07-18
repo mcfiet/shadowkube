@@ -21,9 +21,22 @@ sudo systemctl disable cvm-secrets-enhanced.service 2>/dev/null || true
 
 # Clean up encrypted storage
 echo "🧹 Cleaning encrypted storage..."
+
+# First, kill any processes using the mount points
+sudo fuser -km /var/lib/rancher 2>/dev/null || true
+sudo fuser -km /etc/rancher 2>/dev/null || true
+sudo fuser -km /etc/wireguard 2>/dev/null || true
+sudo fuser -km /var/openebs 2>/dev/null || true
+
+# Wait a moment for processes to die
+sleep 2
+
+# Unmount in reverse order (bind mounts first)
 sudo umount /etc/rancher 2>/dev/null || true
 sudo umount /etc/wireguard 2>/dev/null || true
 sudo umount /var/openebs 2>/dev/null || true
+
+# Then unmount the main encrypted storage
 sudo umount /var/lib/rancher 2>/dev/null || true
 
 # Close LUKS container
@@ -35,14 +48,17 @@ if [ -n "$LOOP_DEV" ]; then
     sudo losetup -d "$LOOP_DEV" 2>/dev/null || true
 fi
 
+# Now we can safely remove the directories
+echo "🗑️ Removing directories..."
+sudo rm -rf /var/lib/rancher/ 2>/dev/null || true
+
 # Remove encrypted storage image
 sudo rm -f /var/lib/cvm-storage.img
 sudo rm -f /var/run/cvm-loop-device
 
 # Clean up RKE2 completely
 echo "🗑️ Removing RKE2..."
-sudo rm -rf /var/lib/rancher/
-sudo rm -rf /etc/rancher/
+sudo rm -rf /etc/rancher/ 2>/dev/null || true
 sudo rm -rf /usr/local/lib/systemd/system/rke2*
 sudo rm -rf /etc/systemd/system/rke2*
 sudo rm -f /usr/local/bin/rke2
@@ -114,7 +130,7 @@ echo "🎯 System is now clean slate - ready for fresh setup"
 echo ""
 echo "📋 Next steps:"
 echo "1. Reboot (recommended): sudo reboot"
-echo "2. Or start fresh setup: sudo ./simplified-setup.sh master/worker TOKEN"
+echo "2. Or start fresh setup: sudo ./setup_cVM.sh master/worker TOKEN"
 echo ""
 echo "⚠️  Note: You may want to clean Vault entries too:"
 echo "   vault delete -namespace=team-msc cubbyhole/cluster-nodes/$(hostname)"
