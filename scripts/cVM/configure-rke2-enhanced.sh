@@ -35,8 +35,7 @@ check_prerequisites() {
 
 # Install RKE2
 install_rke2() {
-  # Check if RKE2 binaries exist
-  if [ -f /usr/local/bin/rke2 ] || [ -f /var/lib/rancher/rke2/bin/rke2 ]; then
+  if command rke2 -v >/dev/null 2>&1; then
     log "RKE2 already installed, skipping installation"
     return 0
   fi
@@ -44,37 +43,14 @@ install_rke2() {
   log "Installing RKE2..."
 
   # Download and install RKE2
-  curl -sfL https://get.rke2.io | sh -
+  curl -sfL https://get.rke2.io | sh - || die "Failed to install RKE2"
 
-  # Check installation result
-  if [ $? -ne 0 ]; then
-    die "RKE2 installation script failed"
+  # Verify installation
+  if ! command -v /usr/local/bin/rke2 >/dev/null 2>&1; then
+    die "RKE2 binary not found at /usr/local/bin/rke2"
   fi
 
-  # Verify installation - check common locations
-  if [ -f /usr/local/bin/rke2 ]; then
-    log "RKE2 installed to /usr/local/bin/rke2"
-  elif [ -f /var/lib/rancher/rke2/bin/rke2 ]; then
-    log "RKE2 installed to /var/lib/rancher/rke2/bin/rke2"
-    # Create symlink for easier access
-    sudo ln -sf /var/lib/rancher/rke2/bin/rke2 /usr/local/bin/rke2 2>/dev/null || true
-  else
-    # Try to find rke2 binary
-    RKE2_PATH=$(find /usr/local /var/lib/rancher -name "rke2" -type f 2>/dev/null | head -1)
-    if [ -n "$RKE2_PATH" ]; then
-      log "Found RKE2 at: $RKE2_PATH"
-      sudo ln -sf "$RKE2_PATH" /usr/local/bin/rke2 2>/dev/null || true
-    else
-      die "RKE2 binary not found after installation"
-    fi
-  fi
-
-  # Final verification
-  if command -v rke2 >/dev/null 2>&1; then
-    log "RKE2 installed successfully: $(rke2 --version | head -1)"
-  else
-    die "RKE2 installation verification failed"
-  fi
+  log "RKE2 installed successfully"
 }
 
 # Get network configuration
