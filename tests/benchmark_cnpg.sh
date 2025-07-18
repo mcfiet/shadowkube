@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
-export KUBECONFIG="${KUBECONFIG:-$HOME/.kube/config}"
-export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+export PATH="/var/lib/rancher/rke2/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 NODE_NAME=$(hostname)
 
 # Simple VM type detection (handle dmesg permission issues)
