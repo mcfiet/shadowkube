@@ -115,12 +115,22 @@ run_cpu_benchmarks() {
 
     # CPU Test 1: Prime Calculation mit CSV-Output
     info "   Test 1: CPU Prime Calculation (60s) + Cycles"
-    PERF_CSV="/tmp/perf_${NODE_NAME}_$$.csv"
-    perf stat -x, \
-        -e cycles,instructions,cache-references,cache-misses,context-switches \
-        -o "${PERF_CSV}" \
-        sysbench cpu --cpu-max-prime=20000 --threads="${CPU_CORES}" --time=60 run \
-        > /tmp/sysbench_cpu.log 2>&1
+    PERF_LOG="/tmp/perf_${NODE_NAME}_$$.log"
+perf stat \
+  -e msr/tsc/,instructions,cache-references,cache-misses,context-switches \
+  -o "${PERF_LOG}" \
+  sysbench cpu \
+    --cpu-max-prime=20000 \
+    --threads="${CPU_CORES}" \
+    --time=60 run \
+  > /tmp/sysbench_cpu.log 2>&1
+
+        echo "⏱️ Sysbench-Output:"
+        cat /tmp/sysbench_cpu.log
+        echo ""
+        echo "📊 Perf-Stat via TSC:"
+        cat "${PERF_LOG}"
+        rm -f "${PERF_LOG}" /tmp/sysbench_cpu.log
 
     # CSV parsen
     CPU_CYCLES=$(awk -F, '$1=="cycles"{ gsub(/,/,"",$2); print $2 }' "${PERF_CSV}")
