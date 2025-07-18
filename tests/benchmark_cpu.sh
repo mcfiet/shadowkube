@@ -52,12 +52,15 @@ fi
 setup_perf() {
 
     # Check if running as root
-    if [ "$EUID" -ne 0 ]; then
-        echo "⚠️  Running without root - some perf measurements will be limited"
-        echo "   For full perf access, run: sudo $0"
+        if [ "$EUID" -ne 0 ]; then
+        echo "⚠️  Running without root – run: sudo $0"
         return 1
     fi
+
+    # Erlaube alle PMU-Events
     echo 0 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
+    echo 0 > /proc/sys/kernel/kptr_restrict        2>/dev/null || true
+
     # Install perf if needed
     if ! command -v perf >/dev/null 2>&1; then
         echo "📦 Installing perf tools..."
@@ -117,20 +120,47 @@ run_cpu_benchmarks() {
     info "   Test 1: CPU Prime Calculation (60s) + Cycles"
     PERF_LOG="/tmp/perf_${NODE_NAME}_$$.log"
 perf stat \
-  -e msr/tsc/,instructions,cache-references,cache-misses,context-switches \
-  -o "${PERF_LOG}" \
-  sysbench cpu \
-    --cpu-max-prime=20000 \
-    --threads="${CPU_CORES}" \
-    --time=60 run \
-  > /tmp/sysbench_cpu.log 2>&1
+      -e msr/tsc/,instructions,cache-references,cache-misses,context-switches \
+      -o "${PERF_LOG}" \
+      sysbench cpu \
+        --cpu-max-prime=20000 \
+        --threads="${CPU_CORES}" \
+        --time=60 run \
+      > /tmp/sysbench_cpu.log 2>&1
 
-        echo "⏱️ Sysbench-Output:"
-        cat /tmp/sysbench_cpu.log
-        echo ""
-        echo "📊 Perf-Stat via TSC:"
-        cat "${PERF_LOG}"
-        rm -f "${PERF_LOG}" /tmp/sysbench_cpu.log
+    echo "⏱️ Sysbench-Output:"
+    cat /tmp/sysbench_cpu.log
+    echo ""
+    echo "📊 Perf-Stat via TSC:"
+    cat "${PERF_LOG}"
+
+    # jetzt aus PERF_LOG parsen:
+    CPU_CYCLES=$(grep 'msr/tsc/'  "${PERF_LOG}" | awk '{gsub(/,/,"",$1); print $1}')
+    CPU_INSTRUCTIONS=$(grep 'instructions' "${PERF_LOG}" | awk '{gsub(/,/,"",$1); print $1}')
+    CPU_CACHE_REFS=$(grep 'cache-references' "${PERF_LOG}" | awk '{gsub(/,/,"",$1); print $1}')
+    CPU_CACHE_MISSES=$(grep 'cache-misses'    "${PERF_LOG}" | awk '{gsub(/,/,"",$1); print $1}')
+    CPU_CONTEXT_SWITCHES=$(grep 'context-switches' "${PERF_LOG}" | awk '{gsub(/,/,"",$1); print $1}')
+
+    # sysbench Metriken
+    CPU_EVENTS=$(grep "events per second" /tmp/sysbench_cpu.log | awk '{print $4}')
+    EVENTS_INT=${CPU_EVENTS%.*}
+
+    # Berechnungen
+    if [ "$CPU_CYCLES" -gt 0 ] && [ "$EVENTS_INT" -gt 0 ]; then
+        CPU_CYCLES_PER_EVENT=$(( CPU_CYCLES / EVENTS_INT ))
+        CPU_IPC=$(awk "BEGIN{ printf \"%.3f\", $CPU_INSTRUCTIONS/$CPU_CYCLES }")
+        CPU_CACHE_MISS_RATE=$(awk "BEGIN{ printf \"%.3f\", $CPU_CACHE_MISSES*100/$CPU_CACHE_REFS }")
+    else
+        CPU_CYCLES_PER_EVENT=0
+        CPU_IPC=0.000
+        CPU_CACHE_MISS_RATE=0.000
+    fi
+
+    log "✅ Prime calc: $CPU_EVENTS events/sec, $CPU_CYCLES_PER_EVENT cycles/event"
+    log "   IPC: $CPU_IPC, Cache miss rate: $CPU_CACHE_MISS_RATE%"
+    log "   Context switches: $CPU_CONTEXT_SWITCHES"
+
+    rm -f "${PERF_LOG}" /tmp/sysbench_cpu.log
 
     # CSV parsen
     CPU_CYCLES=$(awk -F, '$1=="cycles"{ gsub(/,/,"",$2); print $2 }' "${PERF_CSV}")
