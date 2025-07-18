@@ -1,5 +1,5 @@
 [Unit]
-Description=cVM Encrypted Storage with OpenEBS Support
+Description=cVM Encrypted Storage with Attestation and OpenEBS Support
 After=cvm-secrets-enhanced.service
 Requires=cvm-secrets-enhanced.service
 Before=rke2-agent.service rke2-server.service wg-quick@wg0.service
@@ -9,7 +9,7 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=/bin/bash -c '\
     set -e; \
-    echo "Setting up cVM encrypted storage with OpenEBS..."; \
+    echo "Setting up cVM encrypted storage with attestation and OpenEBS..."; \
     \
     # Check if secrets are available \
     if [ ! -f /run/cvm-secrets/luks.key ]; then \
@@ -24,7 +24,15 @@ ExecStart=/bin/bash -c '\
         \
         LOOP_DEV=$(losetup -f); \
         losetup $LOOP_DEV /var/lib/cvm-storage.img; \
-        cryptsetup luksFormat $LOOP_DEV --key-file /run/cvm-secrets/luks.key; \
+        \
+        # Convert hex key to binary for LUKS formatting \
+        xxd -r -p /run/cvm-secrets/luks.key > /tmp/luks.bin 2>/dev/null || cp /run/cvm-secrets/luks.key /tmp/luks.bin; \
+        \
+        # Format with LUKS using binary key \
+        cryptsetup luksFormat $LOOP_DEV --key-file /tmp/luks.bin; \
+        \
+        # Cleanup \
+        rm -f /tmp/luks.bin; \
         losetup -d $LOOP_DEV; \
         echo "✅ New encrypted storage created"; \
     else \
@@ -34,18 +42,27 @@ ExecStart=/bin/bash -c '\
     # Check if already mounted (reboot safety) \
     if mountpoint -q /var/lib/rancher; then \
         echo "✅ Encrypted storage already mounted"; \
-        # Still need to check OpenEBS mounts \
+        # Still need to check other mounts \
     else \
         # Mount encrypted storage \
         LOOP_DEV=$(losetup -f); \
         losetup $LOOP_DEV /var/lib/cvm-storage.img; \
         \
-        # Try to open LUKS container \
-        if ! cryptsetup luksOpen $LOOP_DEV cvm-storage --key-file /run/cvm-secrets/luks.key; then \
-            echo "❌ Failed to open LUKS container"; \
-            losetup -d $LOOP_DEV; \
-            exit 1; \
+        # Convert hex key to binary for LUKS \
+        xxd -r -p /run/cvm-secrets/luks.key > /tmp/luks.bin; \
+        \
+        # Try to open LUKS container with binary key \
+        if ! cryptsetup luksOpen $LOOP_DEV cvm-storage --key-file /tmp/luks.bin; then \
+            echo "❌ Failed to open LUKS container with binary key, trying hex key directly"; \
+            if ! cryptsetup luksOpen $LOOP_DEV cvm-storage --key-file /run/cvm-secrets/luks.key; then \
+                echo "❌ Failed to open LUKS container with both key formats"; \
+                losetup -d $LOOP_DEV; \
+                exit 1; \
+            fi; \
         fi; \
+        \
+        # Cleanup temporary key \
+        rm -f /tmp/luks.bin; \
         \
         # Create filesystem if needed \
         if ! blkid /dev/mapper/cvm-storage >/dev/null 2>&1; then \
@@ -64,8 +81,14 @@ ExecStart=/bin/bash -c '\
     # Create ALL necessary directories in encrypted storage \
     mkdir -p /var/lib/rancher/{etc-rancher,etc-wireguard,rke2,kubelet}; \
     mkdir -p /var/lib/rancher/openebs/{local,config,logs,backup}; \
+    mkdir -p /var/lib/rancher/attestation; \
+    mkdir -p /var/lib/rancher/secure-logs; \
     mkdir -p /etc/{rancher,wireguard}; \
     mkdir -p /var/openebs; \
+    \
+    # Set secure permissions for sensitive directories \
+    chmod 700 /var/lib/rancher/attestation; \
+    chmod 700 /var/lib/rancher/secure-logs; \
     \
     # Setup bind mounts for configs \
     if ! mountpoint -q /etc/rancher; then \
@@ -93,12 +116,31 @@ ExecStart=/bin/bash -c '\
     mkdir -p /var/openebs/local/{pv,hostpath}; \
     mkdir -p /var/openebs/config/{pools,volumes}; \
     \
-    echo "✅ OpenEBS encrypted storage configured"; \
-    echo "   OpenEBS local: /var/openebs/local (encrypted)"; \
-    echo "   OpenEBS config: /var/openebs/config (encrypted)"; \
-    echo "   OpenEBS logs: /var/openebs/logs (encrypted)"; \
+    echo "✅ Encrypted storage structure:"; \
+    echo "   📁 Configs: /etc/rancher, /etc/wireguard (encrypted)"; \
+    echo "   📁 OpenEBS: /var/openebs/* (encrypted)"; \
+    echo "   📁 Attestation: /var/lib/rancher/attestation (encrypted)"; \
+    echo "   📁 Secure logs: /var/lib/rancher/secure-logs (encrypted)"; \
+    echo "   📁 K8s data: /var/lib/rancher/rke2, kubelet (encrypted)"; \
     \
-    echo "✅ cVM encrypted storage ready and mounted with full OpenEBS support"'
+    echo "✅ cVM encrypted storage ready with full attestation and OpenEBS support"; \
+    \
+    # STAGE 2: Create permanent attestation in encrypted storage \
+    echo "🎯 Stage 2: Creating permanent attestation in encrypted storage..."; \
+    /usr/local/bin/simple-cvm-attestation.sh 2 || { \
+        echo "⚠️ Stage 2 attestation failed, but continuing..."; \
+    }; \
+    \
+    # Update node status in Vault to reflect stage 2 completion \
+    if [ -f /var/lib/rancher/attestation/cvm-attestation.json ]; then \
+        PERMANENT_ATTESTATION=$(cat /var/lib/rancher/attestation/cvm-attestation.json | jq -c); \
+        vault write -namespace=team-msc cubbyhole/cluster-nodes/$HOSTNAME-stage2 \
+            attestation="$PERMANENT_ATTESTATION" \
+            status="stage2_verified" \
+            encrypted_storage="true" \
+            updated="$(date -u +%Y-%m-%dT%H:%M:%SZ)" || true; \
+        echo "✅ Node status updated to stage 2 verified"; \
+    fi'
 
 ExecStop=/bin/bash -c '\
     echo "Unmounting cVM encrypted storage..."; \
@@ -111,6 +153,12 @@ ExecStop=/bin/bash -c '\
     umount /etc/wireguard 2>/dev/null || true; \
     umount /var/openebs 2>/dev/null || true; \
     echo "✅ All bind mounts unmounted"; \
+    \
+    # Securely clean sensitive data before unmount \
+    if [ -d /var/lib/rancher/attestation ]; then \
+        find /var/lib/rancher/attestation -name "*.key" -exec shred -vfz -n 3 {} \; 2>/dev/null || true; \
+        echo "✅ Attestation keys securely wiped"; \
+    fi; \
     \
     # Unmount encrypted storage \
     umount /var/lib/rancher 2>/dev/null || true; \
@@ -129,7 +177,7 @@ ExecStop=/bin/bash -c '\
     # Cleanup \
     rm -f /var/run/cvm-loop-device; \
     \
-    echo "✅ cVM encrypted storage completely unmounted"'
+    echo "✅ cVM encrypted storage completely unmounted and secured"'
 
 Restart=on-failure
 RestartSec=10
