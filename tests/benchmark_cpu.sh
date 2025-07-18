@@ -131,20 +131,30 @@ run_cpu_benchmarks() {
         CPU_RESULT=$(cat /tmp/sysbench_output.log)
         
         # Parse perf output
-        if [ -f "$PERF_OUTPUT_FILE" ]; then
-            CPU_CYCLES=$(grep 'cycles' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
-            CPU_INSTRUCTIONS=$(grep 'instructions' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
-            CPU_CACHE_REFS=$(grep 'cache-references' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
-            CPU_CACHE_MISSES=$(grep 'cache-misses' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
-            CPU_CONTEXT_SWITCHES=$(grep 'context-switches' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
-            rm -f "$PERF_OUTPUT_FILE"
-        else
-            CPU_CYCLES="0"
-            CPU_INSTRUCTIONS="0"
-            CPU_CACHE_REFS="0"
-            CPU_CACHE_MISSES="0"
-            CPU_CONTEXT_SWITCHES="0"
-        fi
+        # Parse perf output
+if [ -f "$PERF_OUTPUT_FILE" ]; then
+    # Debug: Show raw perf output
+    echo "📊 Raw perf output:"
+    cat "$PERF_OUTPUT_FILE"
+    echo ""
+    
+    # Extract perf metrics with better parsing
+    CPU_CYCLES=$(awk '/cycles/ && !/cache/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
+    CPU_INSTRUCTIONS=$(awk '/instructions/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
+    CPU_CACHE_REFS=$(awk '/cache-references/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
+    CPU_CACHE_MISSES=$(awk '/cache-misses/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
+    CPU_CONTEXT_SWITCHES=$(awk '/context-switches/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
+    
+    echo "Parsed values: cycles=$CPU_CYCLES, instructions=$CPU_INSTRUCTIONS"
+    rm -f "$PERF_OUTPUT_FILE"
+else
+    # Fallback values
+    CPU_CYCLES="0"
+    CPU_INSTRUCTIONS="0"
+    CPU_CACHE_REFS="0"
+    CPU_CACHE_MISSES="0"
+    CPU_CONTEXT_SWITCHES="0"
+fi
     else
         # Fallback: Run without perf
         CPU_RESULT=$(sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run 2>&1)
@@ -215,16 +225,18 @@ run_memory_benchmarks() {
     log "🧠 Running memory benchmarks..."
     
     # Memory Test 1: Sequential Write
-    info "   Test 1: Memory Sequential Write (30 seconds)"
-    MEMORY_WRITE_RESULT=$(timeout 60 sysbench memory --memory-block-size=1K --memory-total-size=2G --memory-oper=write --threads="$CPU_CORES" --time=30 run 2>&1 || echo "Memory write test failed")
-    
-    if echo "$MEMORY_WRITE_RESULT" | grep -q "transferred"; then
-        MEMORY_WRITE_THROUGHPUT=$(echo "$MEMORY_WRITE_RESULT" | grep "transferred" | awk '{print $3" "$4}')
-        MEMORY_WRITE_LATENCY=$(echo "$MEMORY_WRITE_RESULT" | grep "avg:" | awk '{print $2}' | sed 's/ms//')
-    else
-        MEMORY_WRITE_THROUGHPUT="unknown"
-        MEMORY_WRITE_LATENCY="999"
-    fi
+        info "   Test 1: Memory Sequential Write (30 seconds)"
+        MEMORY_WRITE_RESULT=$(timeout 60 sysbench memory --memory-block-size=1K --memory-total-size=2G --memory-oper=write --threads="$CPU_CORES" --time=30 run 2>&1 || echo "Memory write test failed")
+
+        if echo "$MEMORY_WRITE_RESULT" | grep -q "transferred"; then
+            # Extract the full throughput line and parse it properly
+            MEMORY_WRITE_LINE=$(echo "$MEMORY_WRITE_RESULT" | grep "transferred")
+            MEMORY_WRITE_THROUGHPUT=$(echo "$MEMORY_WRITE_LINE" | awk '{for(i=1;i<=NF;i++) if($i ~ /^[0-9]+\.[0-9]+$/ || $i ~ /^[0-9]+$/) {print $i " " $(i+1); break}}')
+            MEMORY_WRITE_LATENCY=$(echo "$MEMORY_WRITE_RESULT" | grep "avg:" | awk '{print $2}' | sed 's/ms//')
+        else
+            MEMORY_WRITE_THROUGHPUT="unknown"
+            MEMORY_WRITE_LATENCY="999"
+        fi
     
     # Memory Test 2: Sequential Read
     info "   Test 2: Memory Sequential Read (30 seconds)"
