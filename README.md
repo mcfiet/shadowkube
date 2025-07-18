@@ -32,14 +32,13 @@ cvm-cluster-setup/
 ### 1. Repo klonen
 
 ```bash
-git clone https://mcfiet/shadowkube cvm-cluster-setup
-cd cvm-cluster-setup
-````
+git clone https://github.com/mcfiet/shadowkube.git
+cd shadowkube
+```
 
 ### 2. Vorbereitung
 
 ```bash
-chmod +x setup.sh
 sudo ./setup.sh
 ```
 
@@ -50,23 +49,7 @@ Dies kopiert alle Skripte nach `/usr/local/bin/` und installiert systemd-Dienste
 ## 🧑‍✈️ Master Node Setup
 
 ```bash
-# 1. Initiales Setup
-sudo /usr/local/bin/setup-cvm-enhanced.sh master
-
-# 2. Attestierung + Vault-Integration
-sudo /usr/local/bin/vhsm-cvm-auth-enhanced.sh master
-
-# 3. Secrets und Storage
-sudo systemctl start cvm-secrets-enhanced
-sudo systemctl start cvm-storage
-
-# 4. Wireguard & RKE2 Konfiguration
-sudo /usr/local/bin/configure-wireguard-enhanced.sh
-sudo /usr/local/bin/configure-rke2-enhanced.sh
-
-# 5. Services starten
-sudo systemctl start wg-quick@wg0
-sudo systemctl start rke2-server
+sudo ./scripts/cVM/setup-cVM.sh master <VAULT-TOKEN>
 ```
 
 ---
@@ -74,24 +57,13 @@ sudo systemctl start rke2-server
 ## 🧑‍🔧 Worker Node Setup
 
 ```bash
-# 1. Initiales Setup
-sudo /usr/local/bin/setup-cvm-enhanced.sh worker
-
-# 2. Attestierung + Vault-Integration
-sudo /usr/local/bin/vhsm-cvm-auth-enhanced.sh worker
-
-# 3. Secrets und Storage
-sudo systemctl start cvm-secrets-enhanced
-sudo systemctl start cvm-storage
-
-# 4. Wireguard & RKE2 Konfiguration (mit Master Auto-Discovery)
-sudo /usr/local/bin/configure-wireguard-enhanced.sh
-sudo /usr/local/bin/configure-rke2-enhanced.sh
-
-# 5. Services starten
-sudo systemctl start wg-quick@wg0
-sudo systemctl start rke2-agent
+sudo ./scripts/cVM/setup-cVM.sh worker <VAULT-TOKEN>
 ```
+>[!NOTE]
+>Jede Node muss mit jeder anderen im VPN Mesh verbunden sein. Wenn die Worker Node, die gerade eingerichtet wird, `==> Starting RKE2 agent...` ausgibt, dann muss auf den anderen Nodes folgendes ausgeführt werden:
+>```bash
+>sudo scripts/cVM/configure-wireguard-enhanced.sh
+>```
 
 ---
 
