@@ -81,6 +81,13 @@ psql -c "\dt pgbench*"
 
 # Run benchmark - your original with the fixed write-heavy test
 echo "🚀 Running PostgreSQL benchmark..."
+echo "🚀 Running PostgreSQL benchmark with cycles measurement..."
+
+# Start system-wide perf monitoring
+perf stat -e cycles,instructions,cache-references,cache-misses,context-switches \
+  -I 1000 -x ',' -o /tmp/pgbench_cycles.log sleep 600 &
+PERF_PID=$!
+
 kubectl run pgbench-perfect --image=postgres:15-alpine -n $NAMESPACE --rm -i --restart=Never \
   --env="PGPASSWORD=$POSTGRES_PASSWORD" \
   --env="PGHOST=$PG_IP" \
@@ -199,6 +206,32 @@ echo "📊 All tests completed on '"$NODE_NAME"' ('"$CVM_TYPE"' VM)"
 
 echo ""
 echo "🧹 Cleaning up resources..."
+# Stop perf monitoring and analyze cycles
+kill $PERF_PID 2>/dev/null || true
+sleep 2
+
+if [ -f /tmp/pgbench_cycles.log ]; then
+    echo ""
+    echo "📊 PostgreSQL Cycles Analysis:"
+    TOTAL_CYCLES=$(awk -F',' '/cycles/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
+    TOTAL_INSTRUCTIONS=$(awk -F',' '/instructions/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
+    TOTAL_CACHE_MISSES=$(awk -F',' '/cache-misses/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
+    TOTAL_CONTEXT_SWITCHES=$(awk -F',' '/context-switches/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
+    
+    DATABASE_IPC=$(echo "scale=3; $TOTAL_INSTRUCTIONS / $TOTAL_CYCLES" | bc -l 2>/dev/null || echo "0")
+    
+    echo "   Total cycles: $TOTAL_CYCLES"
+    echo "   Instructions per cycle: $DATABASE_IPC"
+    echo "   Cache misses: $TOTAL_CACHE_MISSES"
+    echo "   Context switches: $TOTAL_CONTEXT_SWITCHES"
+    echo ""
+    echo "🎯 KEY RESEARCH METRIC: Database IPC = $DATABASE_IPC"
+    echo "   Compare this IPC value between regular and confidential VMs!"
+    
+    rm -f /tmp/pgbench_cycles.log
+fi
+
+echo ""
 kubectl delete namespace $NAMESPACE --force
 echo "🎉 Perfect CNPG PostgreSQL benchmark completed!"
 echo "📊 For detailed TPS numbers, check the pgbench output above"

@@ -75,14 +75,20 @@ install_sysbench() {
 # =============================================================================
 
 run_cpu_benchmarks() {
-    log "🧮 Running CPU benchmarks..."
+    log "🧮 Running CPU benchmarks with cycles measurement..."
     
     install_sysbench || { error "Could not install sysbench"; return 1; }
     
-    # CPU Test 1: Prime number calculation (measures raw CPU performance)
-    info "   Test 1: CPU Prime Calculation (60 seconds)"
-    CPU_RESULT=$(timeout 120 sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run 2>&1 || echo "CPU test failed")
+    # Enable perf access
+    echo 1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
     
+    # CPU Test 1: Prime number calculation with cycles
+    info "   Test 1: CPU Prime Calculation (60 seconds) + Cycles"
+    PERF_RESULT=$(perf stat -e cycles,instructions,cache-references,cache-misses,context-switches -x ',' \
+        sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run 2>&1)
+    
+    # Parse sysbench output
+    CPU_RESULT=$(echo "$PERF_RESULT" | grep -A 20 "sysbench")
     if echo "$CPU_RESULT" | grep -q "events per second"; then
         CPU_EVENTS=$(echo "$CPU_RESULT" | grep "events per second" | awk '{print $4}')
         CPU_LATENCY_AVG=$(echo "$CPU_RESULT" | grep "avg:" | awk '{print $2}' | sed 's/ms//')
@@ -93,23 +99,40 @@ run_cpu_benchmarks() {
         CPU_LATENCY_AVG="999"
         CPU_LATENCY_95TH="999"
         CPU_LATENCY_MAX="999"
-        warn "CPU prime test failed"
     fi
     
-    # CPU Test 2: Different workload - smaller primes, more iterations
-    info "   Test 2: CPU Intensive Calculation (30 seconds)"
-    CPU_INTENSIVE_RESULT=$(timeout 60 sysbench cpu --cpu-max-prime=10000 --threads="$CPU_CORES" --time=30 run 2>&1 || echo "CPU intensive test failed")
+    # Parse perf cycles output
+    CPU_CYCLES=$(echo "$PERF_RESULT" | grep 'cycles' | head -1 | cut -d',' -f1 | tr -d ' ')
+    CPU_INSTRUCTIONS=$(echo "$PERF_RESULT" | grep 'instructions' | cut -d',' -f1 | tr -d ' ')
+    CPU_CACHE_REFS=$(echo "$PERF_RESULT" | grep 'cache-references' | cut -d',' -f1 | tr -d ' ')
+    CPU_CACHE_MISSES=$(echo "$PERF_RESULT" | grep 'cache-misses' | cut -d',' -f1 | tr -d ' ')
+    CPU_CONTEXT_SWITCHES=$(echo "$PERF_RESULT" | grep 'context-switches' | cut -d',' -f1 | tr -d ' ')
     
+    # Calculate cycles metrics
+    CPU_CYCLES_PER_EVENT=$((CPU_CYCLES / CPU_EVENTS))
+    CPU_IPC=$(echo "scale=3; $CPU_INSTRUCTIONS / $CPU_CYCLES" | bc -l 2>/dev/null || echo "0")
+    CPU_CACHE_MISS_RATE=$(echo "scale=3; $CPU_CACHE_MISSES * 100 / $CPU_CACHE_REFS" | bc -l 2>/dev/null || echo "0")
+    
+    # CPU Test 2: Intensive calculation with cycles
+    info "   Test 2: CPU Intensive Calculation (30 seconds) + Cycles"
+    PERF_INTENSIVE_RESULT=$(perf stat -e cycles,instructions -x ',' \
+        sysbench cpu --cpu-max-prime=10000 --threads="$CPU_CORES" --time=30 run 2>&1)
+    
+    CPU_INTENSIVE_RESULT=$(echo "$PERF_INTENSIVE_RESULT" | grep -A 10 "sysbench")
     if echo "$CPU_INTENSIVE_RESULT" | grep -q "events per second"; then
         CPU_INTENSIVE_EVENTS=$(echo "$CPU_INTENSIVE_RESULT" | grep "events per second" | awk '{print $4}')
     else
         CPU_INTENSIVE_EVENTS="0"
     fi
     
+    CPU_INTENSIVE_CYCLES=$(echo "$PERF_INTENSIVE_RESULT" | grep 'cycles' | cut -d',' -f1 | tr -d ' ')
+    CPU_INTENSIVE_CYCLES_PER_EVENT=$((CPU_INTENSIVE_CYCLES / CPU_INTENSIVE_EVENTS))
+    
     log "✅ CPU Benchmark Results:"
-    log "   Prime calc (60s): $CPU_EVENTS events/sec, ${CPU_LATENCY_AVG}ms avg latency"
-    log "   Intensive (30s): $CPU_INTENSIVE_EVENTS events/sec"
-    log "   Latency 95th: ${CPU_LATENCY_95TH}ms, Max: ${CPU_LATENCY_MAX}ms"
+    log "   Prime calc: $CPU_EVENTS events/sec, $CPU_CYCLES_PER_EVENT cycles/event"
+    log "   Prime IPC: $CPU_IPC, Cache miss rate: ${CPU_CACHE_MISS_RATE}%"
+    log "   Intensive: $CPU_INTENSIVE_EVENTS events/sec, $CPU_INTENSIVE_CYCLES_PER_EVENT cycles/event"
+    log "   Context switches: $CPU_CONTEXT_SWITCHES"
 }
 
 # =============================================================================
@@ -263,6 +286,10 @@ store_results() {
     "cpu_benchmarks": {
         "prime_calculation": {
             "events_per_second": $CPU_EVENTS,
+            "cycles_per_event": $CPU_CYCLES_PER_EVENT,
+            "instructions_per_cycle": $CPU_IPC,
+            "cache_miss_rate_percent": $CPU_CACHE_MISS_RATE,
+            "context_switches": $CPU_CONTEXT_SWITCHES,
             "latency_avg_ms": $CPU_LATENCY_AVG,
             "latency_95th_ms": $CPU_LATENCY_95TH,
             "latency_max_ms": $CPU_LATENCY_MAX,
@@ -270,6 +297,7 @@ store_results() {
         },
         "intensive_calculation": {
             "events_per_second": $CPU_INTENSIVE_EVENTS,
+            "cycles_per_event": $CPU_INTENSIVE_CYCLES_PER_EVENT,
             "test_duration_seconds": 30
         }
     },
