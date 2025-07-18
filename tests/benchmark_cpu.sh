@@ -50,13 +50,14 @@ else
 fi
 
 setup_perf() {
+
     # Check if running as root
     if [ "$EUID" -ne 0 ]; then
         echo "⚠️  Running without root - some perf measurements will be limited"
         echo "   For full perf access, run: sudo $0"
         return 1
     fi
-    
+    echo 0 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
     # Install perf if needed
     if ! command -v perf >/dev/null 2>&1; then
         echo "📦 Installing perf tools..."
@@ -123,9 +124,12 @@ run_cpu_benchmarks() {
     if [ "$PERF_AVAILABLE" = "true" ]; then
         # Run with perf if available
         PERF_OUTPUT_FILE="/tmp/cpu_perf_$$.log"
-        perf stat -e cycles,instructions,cache-references,cache-misses,context-switches \
-            -o "$PERF_OUTPUT_FILE" \
-            sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run > /tmp/sysbench_output.log 2>&1
+        PERF_CSV="/tmp/cpu_perf_$$.csv"
+        perf stat -x, \
+            -e cycles,instructions,cache-references,cache-misses,context-switches \
+            -o "${PERF_CSV}" \
+            sysbench cpu --cpu-max-prime=20000 --threads="${CPU_CORES}" --time=60 run > /tmp/sysbench_output.log 2>&1
+
         
         # Parse sysbench output
         CPU_RESULT=$(cat /tmp/sysbench_output.log)
@@ -139,14 +143,15 @@ if [ -f "$PERF_OUTPUT_FILE" ]; then
     echo ""
     
     # Extract perf metrics with better parsing
-    CPU_CYCLES=$(awk '/cycles/ && !/cache/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
-    CPU_INSTRUCTIONS=$(awk '/instructions/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
-    CPU_CACHE_REFS=$(awk '/cache-references/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
-    CPU_CACHE_MISSES=$(awk '/cache-misses/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
-    CPU_CONTEXT_SWITCHES=$(awk '/context-switches/ {gsub(/[,]/, "", $1); print $1; exit}' "$PERF_OUTPUT_FILE" || echo "0")
-    
+    CPU_CYCLES=$(awk -F, '$1=="cycles"{gsub(/,/,"",$2); print $2}' "${PERF_CSV}")
+    CPU_INSTRUCTIONS=$(awk -F, '$1=="instructions"{gsub(/,/,"",$2); print $2}' "${PERF_CSV}")
+    CPU_CACHE_REFS=$(awk -F, '$1=="cache-references"{gsub(/,/,"",$2); print $2}' "${PERF_CSV}")
+    CPU_CACHE_MISSES=$(awk -F, '$1=="cache-misses"{gsub(/,/,"",$2); print $2}' "${PERF_CSV}")
+    CPU_CONTEXT_SWITCHES=$(awk -F, '$1=="context-switches"{gsub(/,/,"",$2); print $2}' "${PERF_CSV}")
+
     echo "Parsed values: cycles=$CPU_CYCLES, instructions=$CPU_INSTRUCTIONS"
     rm -f "$PERF_OUTPUT_FILE"
+    rm -f "${PERF_CSV}"
 else
     # Fallback values
     CPU_CYCLES="0"
