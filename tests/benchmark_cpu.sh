@@ -49,6 +49,38 @@ else
     warn "VHSM not available - results will be stored locally only"
 fi
 
+setup_perf() {
+    # Check if running as root
+    if [ "$EUID" -ne 0 ]; then
+        echo "⚠️  Running without root - some perf measurements will be limited"
+        echo "   For full perf access, run: sudo $0"
+        return 1
+    fi
+    
+    # Install perf if needed
+    if ! command -v perf >/dev/null 2>&1; then
+        echo "📦 Installing perf tools..."
+        if [ -f /etc/suse-release ] || [ -f /etc/SUSE-brand ]; then
+            zypper install -y perf kernel-devel 2>/dev/null || true
+        elif [ -f /etc/debian_version ]; then
+            apt-get update && apt-get install -y linux-tools-common linux-tools-generic 2>/dev/null || true
+        fi
+    fi
+    
+    # Set perf permissions
+    echo 1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
+    echo 0 > /proc/sys/kernel/kptr_restrict 2>/dev/null || true
+    
+    # Test if perf works
+    if perf stat -e cycles sleep 0.1 >/dev/null 2>&1; then
+        echo "✅ Perf working correctly"
+        return 0
+    else
+        echo "❌ Perf not working - will use fallback measurements"
+        return 1
+    fi
+}
+
 # =============================================================================
 # Install sysbench if needed
 # =============================================================================
@@ -79,16 +111,51 @@ run_cpu_benchmarks() {
     
     install_sysbench || { error "Could not install sysbench"; return 1; }
     
-    # Enable perf access
-    echo 1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
+    # Check if perf is available
+    PERF_AVAILABLE=false
+    if setup_perf; then
+        PERF_AVAILABLE=true
+    fi
     
     # CPU Test 1: Prime number calculation with cycles
     info "   Test 1: CPU Prime Calculation (60 seconds) + Cycles"
-    PERF_RESULT=$(perf stat -e cycles,instructions,cache-references,cache-misses,context-switches -x ',' \
-        sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run 2>&1)
     
-    # Parse sysbench output
-    CPU_RESULT=$(echo "$PERF_RESULT" | grep -A 20 "sysbench")
+    if [ "$PERF_AVAILABLE" = "true" ]; then
+        # Run with perf if available
+        PERF_OUTPUT_FILE="/tmp/cpu_perf_$$.log"
+        perf stat -e cycles,instructions,cache-references,cache-misses,context-switches \
+            -o "$PERF_OUTPUT_FILE" \
+            sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run > /tmp/sysbench_output.log 2>&1
+        
+        # Parse sysbench output
+        CPU_RESULT=$(cat /tmp/sysbench_output.log)
+        
+        # Parse perf output
+        if [ -f "$PERF_OUTPUT_FILE" ]; then
+            CPU_CYCLES=$(grep 'cycles' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
+            CPU_INSTRUCTIONS=$(grep 'instructions' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
+            CPU_CACHE_REFS=$(grep 'cache-references' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
+            CPU_CACHE_MISSES=$(grep 'cache-misses' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
+            CPU_CONTEXT_SWITCHES=$(grep 'context-switches' "$PERF_OUTPUT_FILE" | awk '{print $1}' | tr -d ',' | sed 's/[^0-9]//g' || echo "0")
+            rm -f "$PERF_OUTPUT_FILE"
+        else
+            CPU_CYCLES="0"
+            CPU_INSTRUCTIONS="0"
+            CPU_CACHE_REFS="0"
+            CPU_CACHE_MISSES="0"
+            CPU_CONTEXT_SWITCHES="0"
+        fi
+    else
+        # Fallback: Run without perf
+        CPU_RESULT=$(sysbench cpu --cpu-max-prime=20000 --threads="$CPU_CORES" --time=60 run 2>&1)
+        CPU_CYCLES="0"
+        CPU_INSTRUCTIONS="0"
+        CPU_CACHE_REFS="0"
+        CPU_CACHE_MISSES="0"
+        CPU_CONTEXT_SWITCHES="0"
+    fi
+    
+    # Parse sysbench results
     if echo "$CPU_RESULT" | grep -q "events per second"; then
         CPU_EVENTS=$(echo "$CPU_RESULT" | grep "events per second" | awk '{print $4}')
         CPU_LATENCY_AVG=$(echo "$CPU_RESULT" | grep "avg:" | awk '{print $2}' | sed 's/ms//')
@@ -101,38 +168,43 @@ run_cpu_benchmarks() {
         CPU_LATENCY_MAX="999"
     fi
     
-    # Parse perf cycles output
-    CPU_CYCLES=$(echo "$PERF_RESULT" | grep 'cycles' | head -1 | cut -d',' -f1 | tr -d ' ')
-    CPU_INSTRUCTIONS=$(echo "$PERF_RESULT" | grep 'instructions' | cut -d',' -f1 | tr -d ' ')
-    CPU_CACHE_REFS=$(echo "$PERF_RESULT" | grep 'cache-references' | cut -d',' -f1 | tr -d ' ')
-    CPU_CACHE_MISSES=$(echo "$PERF_RESULT" | grep 'cache-misses' | cut -d',' -f1 | tr -d ' ')
-    CPU_CONTEXT_SWITCHES=$(echo "$PERF_RESULT" | grep 'context-switches' | cut -d',' -f1 | tr -d ' ')
+    # Calculate cycles metrics (only if we have valid data)
+    if [ "$CPU_CYCLES" -gt 0 ] && [ "$CPU_EVENTS" -gt 0 ]; then
+        CPU_CYCLES_PER_EVENT=$((CPU_CYCLES / CPU_EVENTS))
+        CPU_IPC=$(echo "scale=3; $CPU_INSTRUCTIONS / $CPU_CYCLES" | bc -l 2>/dev/null || echo "0")
+        CPU_CACHE_MISS_RATE=$(echo "scale=3; $CPU_CACHE_MISSES * 100 / $CPU_CACHE_REFS" | bc -l 2>/dev/null || echo "0")
+    else
+        CPU_CYCLES_PER_EVENT="0"
+        CPU_IPC="0"
+        CPU_CACHE_MISS_RATE="0"
+    fi
     
-    # Calculate cycles metrics
-    CPU_CYCLES_PER_EVENT=$((CPU_CYCLES / CPU_EVENTS))
-    CPU_IPC=$(echo "scale=3; $CPU_INSTRUCTIONS / $CPU_CYCLES" | bc -l 2>/dev/null || echo "0")
-    CPU_CACHE_MISS_RATE=$(echo "scale=3; $CPU_CACHE_MISSES * 100 / $CPU_CACHE_REFS" | bc -l 2>/dev/null || echo "0")
+    # CPU Test 2: Intensive calculation (simplified)
+    info "   Test 2: CPU Intensive Calculation (30 seconds)"
+    CPU_INTENSIVE_RESULT=$(sysbench cpu --cpu-max-prime=10000 --threads="$CPU_CORES" --time=30 run 2>&1)
     
-    # CPU Test 2: Intensive calculation with cycles
-    info "   Test 2: CPU Intensive Calculation (30 seconds) + Cycles"
-    PERF_INTENSIVE_RESULT=$(perf stat -e cycles,instructions -x ',' \
-        sysbench cpu --cpu-max-prime=10000 --threads="$CPU_CORES" --time=30 run 2>&1)
-    
-    CPU_INTENSIVE_RESULT=$(echo "$PERF_INTENSIVE_RESULT" | grep -A 10 "sysbench")
     if echo "$CPU_INTENSIVE_RESULT" | grep -q "events per second"; then
         CPU_INTENSIVE_EVENTS=$(echo "$CPU_INTENSIVE_RESULT" | grep "events per second" | awk '{print $4}')
     else
         CPU_INTENSIVE_EVENTS="0"
     fi
     
-    CPU_INTENSIVE_CYCLES=$(echo "$PERF_INTENSIVE_RESULT" | grep 'cycles' | cut -d',' -f1 | tr -d ' ')
-    CPU_INTENSIVE_CYCLES_PER_EVENT=$((CPU_INTENSIVE_CYCLES / CPU_INTENSIVE_EVENTS))
+    CPU_INTENSIVE_CYCLES="0"
+    CPU_INTENSIVE_CYCLES_PER_EVENT="0"
     
+    # Results
     log "✅ CPU Benchmark Results:"
     log "   Prime calc: $CPU_EVENTS events/sec, $CPU_CYCLES_PER_EVENT cycles/event"
-    log "   Prime IPC: $CPU_IPC, Cache miss rate: ${CPU_CACHE_MISS_RATE}%"
-    log "   Intensive: $CPU_INTENSIVE_EVENTS events/sec, $CPU_INTENSIVE_CYCLES_PER_EVENT cycles/event"
-    log "   Context switches: $CPU_CONTEXT_SWITCHES"
+    if [ "$PERF_AVAILABLE" = "true" ]; then
+        log "   Prime IPC: $CPU_IPC, Cache miss rate: ${CPU_CACHE_MISS_RATE}%"
+        log "   Context switches: $CPU_CONTEXT_SWITCHES"
+    else
+        log "   Perf data not available (run as root for cycles measurement)"
+    fi
+    log "   Intensive: $CPU_INTENSIVE_EVENTS events/sec"
+    
+    # Cleanup
+    rm -f /tmp/sysbench_output.log
 }
 
 # =============================================================================

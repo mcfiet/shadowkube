@@ -1,6 +1,24 @@
 #!/bin/bash
 set -e
 
+# Enable perf access FIRST
+if [ "$EUID" -eq 0 ]; then
+    echo 1 > /proc/sys/kernel/perf_event_paranoid 2>/dev/null || true
+    echo 0 > /proc/sys/kernel/kptr_restrict 2>/dev/null || true
+else
+    echo "⚠️  Running without root - perf measurements may be limited"
+fi
+
+# Install perf if needed
+if ! command -v perf >/dev/null 2>&1; then
+    echo "📦 Installing perf..."
+    if [ -f /etc/suse-release ]; then
+        zypper install -y perf 2>/dev/null || true
+    fi
+fi
+
+export PATH="/var/lib/rancher/rke2/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+
 export PATH="/var/lib/rancher/rke2/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
 NODE_NAME=$(hostname)
 
@@ -85,7 +103,7 @@ echo "🚀 Running PostgreSQL benchmark with cycles measurement..."
 
 # Start system-wide perf monitoring
 perf stat -e cycles,instructions,cache-references,cache-misses,context-switches \
-  -I 1000 -x ',' -o /tmp/pgbench_cycles.log sleep 600 &
+  -x ',' -o /tmp/pgbench_cycles.log -a -d sleep 600 &
 PERF_PID=$!
 
 kubectl run pgbench-perfect --image=postgres:15-alpine -n $NAMESPACE --rm -i --restart=Never \
@@ -195,7 +213,7 @@ echo "Table sizes:"
 psql -c "SELECT schemaname,tablename,pg_size_pretty(pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename)) as size FROM pg_tables WHERE schemaname='"'"'public'"'"' ORDER BY pg_total_relation_size(schemaname||'"'"'.'"'"'||tablename) DESC;"
 
 echo "Cache hit ratio:"
-psql -c "SELECT datname, round(blks_hit::float/(blks_hit+blks_read)*100, 2) as cache_hit_ratio FROM pg_stat_database WHERE datname = '"'"'app'"'"';"
+psql -c "SELECT datname, CASE WHEN blks_hit+blks_read > 0 THEN CAST(blks_hit*100.0/(blks_hit+blks_read) AS DECIMAL(5,2)) ELSE 0 END as cache_hit_ratio FROM pg_stat_database WHERE datname = 'app';"
 
 rm -f /tmp/write_heavy_fixed.sql /tmp/large_transactions.sql /tmp/complex_reads.sql /tmp/mixed_workload.sql
 
@@ -213,22 +231,47 @@ sleep 2
 if [ -f /tmp/pgbench_cycles.log ]; then
     echo ""
     echo "📊 PostgreSQL Cycles Analysis:"
-    TOTAL_CYCLES=$(awk -F',' '/cycles/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
-    TOTAL_INSTRUCTIONS=$(awk -F',' '/instructions/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
-    TOTAL_CACHE_MISSES=$(awk -F',' '/cache-misses/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
-    TOTAL_CONTEXT_SWITCHES=$(awk -F',' '/context-switches/ {sum+=$2} END {print sum}' /tmp/pgbench_cycles.log)
     
-    DATABASE_IPC=$(echo "scale=3; $TOTAL_INSTRUCTIONS / $TOTAL_CYCLES" | bc -l 2>/dev/null || echo "0")
+    # Parse perf output more robustly
+    if [ -s /tmp/pgbench_cycles.log ]; then
+        TOTAL_CYCLES=$(grep 'cycles' /tmp/pgbench_cycles.log | tail -1 | cut -d',' -f1 | tr -d ' ' | sed 's/[^0-9]//g' || echo "0")
+        TOTAL_INSTRUCTIONS=$(grep 'instructions' /tmp/pgbench_cycles.log | tail -1 | cut -d',' -f1 | tr -d ' ' | sed 's/[^0-9]//g' || echo "0")
+        TOTAL_CACHE_MISSES=$(grep 'cache-misses' /tmp/pgbench_cycles.log | tail -1 | cut -d',' -f1 | tr -d ' ' | sed 's/[^0-9]//g' || echo "0")
+        TOTAL_CONTEXT_SWITCHES=$(grep 'context-switches' /tmp/pgbench_cycles.log | tail -1 | cut -d',' -f1 | tr -d ' ' | sed 's/[^0-9]//g' || echo "0")
+        
+        # Calculate IPC only if we have valid data
+        if [ "$TOTAL_CYCLES" -gt 0 ] && [ "$TOTAL_INSTRUCTIONS" -gt 0 ]; then
+            DATABASE_IPC=$(echo "scale=3; $TOTAL_INSTRUCTIONS / $TOTAL_CYCLES" | bc -l 2>/dev/null || echo "0")
+        else
+            DATABASE_IPC="0"
+        fi
+        
+        echo "   Total cycles: $TOTAL_CYCLES"
+        echo "   Instructions per cycle: $DATABASE_IPC"
+        echo "   Cache misses: $TOTAL_CACHE_MISSES"
+        echo "   Context switches: $TOTAL_CONTEXT_SWITCHES"
+        
+        if [ "$TOTAL_CYCLES" -gt 0 ]; then
+            echo ""
+            echo "🎯 KEY RESEARCH METRIC: Database IPC = $DATABASE_IPC"
+            echo "   Compare this IPC value between regular and confidential VMs!"
+        else
+            echo ""
+            echo "⚠️  No perf data collected - check perf permissions"
+            echo "   Try: sudo sysctl kernel.perf_event_paranoid=1"
+        fi
+    else
+        echo "   No perf data collected"
+    fi
     
-    echo "   Total cycles: $TOTAL_CYCLES"
-    echo "   Instructions per cycle: $DATABASE_IPC"
-    echo "   Cache misses: $TOTAL_CACHE_MISSES"
-    echo "   Context switches: $TOTAL_CONTEXT_SWITCHES"
+    # Show raw perf log for debugging
     echo ""
-    echo "🎯 KEY RESEARCH METRIC: Database IPC = $DATABASE_IPC"
-    echo "   Compare this IPC value between regular and confidential VMs!"
+    echo "📋 Raw perf log (first 5 lines):"
+    head -5 /tmp/pgbench_cycles.log 2>/dev/null || echo "   No perf log found"
     
     rm -f /tmp/pgbench_cycles.log
+else
+    echo "⚠️  Perf monitoring file not found"
 fi
 
 echo ""
