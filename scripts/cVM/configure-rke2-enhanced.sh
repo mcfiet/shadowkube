@@ -75,8 +75,6 @@ get_network_config() {
 setup_master() {
   log "Configuring RKE2 MASTER/SERVER"
 
-  # Read secrets
-  K8S_TOKEN=$(cat /run/cvm-secrets/k8s.token)
   HOSTNAME=$(hostname)
 
   # Create RKE2 directory in encrypted storage
