@@ -73,7 +73,7 @@ sudo ./scripts/cVM/setup-cVM.sh worker <VAULT-TOKEN>
 ```
 
 > \[!NOTE]
-> Each node must be connected to every other node in the VPN mesh. If the worker node being set up outputs `==> Starting RKE2 agent...`, then the following must be run on the other nodes:
+> Each node must be connected to every other node in the VPN mesh. If the worker node being set up outputs `==> Starting RKE2 agent...`, then the following must be run on the master node. When setup is complete run on all nodes:
 >
 > ```bash
 > sudo scripts/cVM/configure-wireguard-enhanced.sh
