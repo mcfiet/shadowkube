@@ -17,10 +17,6 @@ die() {
 # Check prerequisites
 check_prerequisites() {
   # Check if we have required secrets
-  if [ ! -f /run/cvm-secrets/k8s.token ]; then
-    die "Kubernetes token not found in /run/cvm-secrets/k8s.token"
-  fi
-
   if [ ! -f /run/cvm-secrets/node.role ]; then
     die "Node role not found in /run/cvm-secrets/node.role"
   fi
