@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-echo "🏗️ Starte initiales Setup"
+echo "🏗️ Start initial setup"
 cp scripts/cVM/*.sh /usr/local/bin/
 chmod +x /usr/local/bin/*.sh
 
@@ -12,5 +12,7 @@ cp systemd/*.override.conf /etc/systemd/system/wg-quick@wg0.service.d/ 2>/dev/nu
 systemctl daemon-reexec
 systemctl daemon-reload
 
-echo "✅ Basis-Setup abgeschlossen. Starte nun:"
-echo "sudo /usr/local/bin/setup-cvm-enhanced.sh master|worker"
+echo "✅ Base setup completed. Now start:"
+echo "sudo ./scripts/cVM/setup-cVM.sh master <VAULT-TOKEN>"
+echo "or"
+echo "sudo ./scripts/cVM/setup-cVM.sh worker <VAULT-TOKEN>"
