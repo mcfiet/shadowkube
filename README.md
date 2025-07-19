@@ -86,6 +86,28 @@ sudo ./scripts/cVM/setup-cVM.sh worker <VAULT-TOKEN>
 > sudo scripts/cVM/configure-wireguard-enhanced.sh
 > ```
 
+### Install OpenEBS & CloudNativePG (on the master node):
+
+```bash
+sudo bash ./scripts/VM/setup_openebs.sh
+
+Disable replicated storage (Mayastor)? (y/N): y
+Skip CSI VolumeSnapshots CRDs? (y/N): y
+```
+
+Install CloudnativePG:
+```bash
+kubectl apply --server-side -f \
+  https://raw.githubusercontent.com/cloudnative-pg/cloudnative-pg/release-1.26/releases/cnpg-1.26.0.yaml
+```
+
+## 🧪 Testing
+
+Run all tests (on master node)
+```bash
+curl -fsSL https://raw.githubusercontent.com/mcfiet/shadowkube/main/tests/run_all.sh | bash
+```
+
 ---
 
 ## ⚙️ Systemd Services
