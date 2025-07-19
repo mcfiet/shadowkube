@@ -64,6 +64,13 @@ This copies all scripts to `/usr/local/bin/` and installs the systemd services.
 sudo ./scripts/cVM/setup-cVM.sh master <VAULT-TOKEN>
 ```
 
+Make kubectl available
+```bash
+mkdir -p ~/.kube
+sudo cp /etc/rancher/rke2/rke2.yaml ~/.kube/config
+sudo chown $USER ~/.kube/config
+```
+
 ---
 
 ### Worker Node Setup
